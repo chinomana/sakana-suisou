@@ -1,0 +1,121 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fugu-vibe-cli"
+version = "0.1.0"
+description = "A specialized CLI for Sakana Fugu vibe coding with async voice, agent orchestration visualization, and unlimited prompt mode."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Fugu Vibe Contributors"},
+]
+keywords = ["fugu", "sakana", "vibe-coding", "cli", "ai", "agent", "async", "voice"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # API & HTTP
+    "httpx[http2]>=0.27.0",
+    "openai>=1.60.0",
+    "websockets>=13.0",
+    
+    # CLI & TUI
+    "click>=8.1.0",
+    "rich>=13.9.0",
+    "textual>=0.85.0",
+    "prompt-toolkit>=3.0.0",
+    
+    # Async & Concurrency
+    "asyncio-subprocess-tee>=0.2.0",
+    "aiosqlite>=0.20.0",
+    
+    # Voice (optional)
+    "speech-recognition>=3.10.0; extra == 'voice'",
+    "pyaudio>=0.2.14; extra == 'voice'",
+    "faster-whisper>=1.0.0; extra == 'voice'",
+    "webrtcvad>=2.0.10; extra == 'voice'",
+    
+    # Config & Data
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "toml>=0.10.2",
+    "python-dotenv>=1.0.0",
+    
+    # Git & File Operations
+    "gitpython>=3.1.0",
+    "watchdog>=5.0.0",
+    
+    # Utilities
+    "structlog>=24.4.0",
+    "orjson>=3.10.0",
+    "tenacity>=9.0.0",
+    "platformdirs>=4.3.0",
+]
+
+[project.optional-dependencies]
+voice = [
+    "speech-recognition>=3.10.0",
+    "pyaudio>=0.2.14",
+    "faster-whisper>=1.0.0",
+    "webrtcvad>=2.0.10",
+    "numpy>=1.24.0",
+    "soundfile>=0.12.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+    "respx>=0.21.0",
+]
+all = ["fugu-vibe-cli[voice,dev]"]
+
+[project.scripts]
+fugu-vibe = "fugu_vibe.cli.main:cli"
+fv = "fugu_vibe.cli.main:cli"
+
+[project.urls]
+Homepage = "https://github.com/fugu-vibe/fugu-vibe-cli"
+Documentation = "https://fugu-vibe-cli.readthedocs.io"
+Repository = "https://github.com/fugu-vibe/fugu-vibe-cli"
+Issues = "https://github.com/fugu-vibe/fugu-vibe-cli/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fugu_vibe"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
