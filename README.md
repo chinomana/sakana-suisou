@@ -11,9 +11,15 @@ A Python CLI for using Sakana Fugu-style APIs from a terminal. It provides an in
 This project is early-stage. The stable path is the normal text-based `vibe` session.
 
 - Text input: usable.
+- PDF/image/file attachments: usable in `vibe` via `--file` or `/attach`.
 - Workspace selection: usable via `-C/--workspace`.
+- Session output: saved under `.fugu-vibe/sessions/` in the selected workspace.
+- Async task status/output: saved under `.fugu-vibe/tasks/` in the selected workspace.
+- Runtime workspace artifacts under `.fugu-vibe/` and `.fugu-worktrees/` are ignored by git.
 - Orchestration dashboard: optional via `--viz`; disabled by default because full-screen rendering can interfere with terminal input.
 - Voice mode: placeholder only. The recorder/STT scaffolding exists, but push-to-talk/background voice interaction is not fully implemented yet.
+
+This CLI sends prompts and file context to Fugu and records the output. It does not yet automatically apply model-generated patches to your source tree.
 
 ## Install
 
@@ -78,7 +84,26 @@ Useful options:
 ```bash
 fugu-vibe vibe --model fugu-ultra --effort xhigh
 fugu-vibe vibe --web-search
+fugu-vibe vibe --file spec.pdf --file screenshot.png
 fugu-vibe vibe --unlimited
+```
+
+Attach files during a session:
+
+```text
+/attach spec.pdf
+/attach screenshot.png notes.txt
+/files
+/clear-files
+```
+
+Attachments are sent with each prompt until you clear them. Images are sent as image inputs; PDFs and other files are sent as file inputs.
+Small text/code files are inlined as text context. Attachments larger than 25 MB are rejected before sending.
+
+Session transcripts are written to:
+
+```text
+.fugu-vibe/sessions/<timestamp>.md
 ```
 
 Enable the dashboard only when you want it:
@@ -124,6 +149,12 @@ Submit a task:
 fugu-vibe submit "Refactor auth" -p "Refactor the authentication module"
 ```
 
+Include files as context:
+
+```bash
+fugu-vibe submit "Review spec" -p "Summarize this spec" -f spec.pdf --wait
+```
+
 Wait for completion:
 
 ```bash
@@ -150,6 +181,10 @@ Attach or cancel:
 fugu-vibe attach <task-id>
 fugu-vibe cancel <task-id>
 ```
+
+Task records are stored in `.fugu-vibe/tasks/`. Tasks record Fugu output and metadata, but do not automatically apply code changes to the workspace yet.
+
+`submit` currently keeps the submitting process alive while queued/running tasks execute. Use `--wait` when you want the command to print the final result in the same terminal.
 
 ## Configuration
 
@@ -207,6 +242,12 @@ fugu-vibe voice --continuous
 ```
 
 ## Development
+
+Default CLI output is kept quiet. Use `--verbose` before the subcommand to show debug logs:
+
+```bash
+fugu-vibe --verbose vibe
+```
 
 ```bash
 uv venv .venv --python 3.12

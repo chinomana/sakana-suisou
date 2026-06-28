@@ -9,6 +9,7 @@ tasks in real-time.
 from __future__ import annotations
 
 import asyncio
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,9 +20,11 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from fugu_vibe.api.client import FuguClient
+from fugu_vibe.core.attachments import build_content_parts
 from fugu_vibe.core.event_bus import EventBus, EventType
 from fugu_vibe.core.event_log import EventLogWriter
 from fugu_vibe.core.orchestration import OrchestrationAnalyzer
+from fugu_vibe.core.session_output import SessionOutputWriter
 from fugu_vibe.core.task_manager import TaskManager
 from fugu_vibe.ui.dashboard import OrchestrationDashboard
 
@@ -41,6 +44,14 @@ console = Console()
     help="Enable or disable orchestration visualization. Disabled by default for stable input.",
 )
 @click.option("--voice", "-v", is_flag=True, help="Enable voice input")
+@click.option(
+    "--file",
+    "-f",
+    "files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Attach a PDF, image, or file to each prompt. Can be used multiple times.",
+)
 @click.option("--unlimited", "-u", is_flag=True, help="Unlimited prompt mode (no guardrails)")
 @click.pass_context
 def vibe_command(
@@ -50,6 +61,7 @@ def vibe_command(
     web_search: bool,
     viz: bool,
     voice: bool,
+    files: tuple[Path, ...],
     unlimited: bool,
 ) -> None:
     """
@@ -64,6 +76,7 @@ def vibe_command(
         fugu-vibe vibe --effort xhigh           # Maximum reasoning
         fugu-vibe vibe --web-search             # Enable web search
         fugu-vibe vibe --viz                    # Enable dashboard visualization
+        fugu-vibe vibe -f spec.pdf -f photo.png # Attach files
         fugu-vibe vibe --voice                  # Enable voice control
         fugu-vibe vibe --unlimited              # No prompt restrictions
     """
@@ -78,7 +91,7 @@ def vibe_command(
         config.prompt.unlimited_mode = True
     
     # Run async session
-    asyncio.run(_vibe_session(config, web_search, viz, voice))
+    asyncio.run(_vibe_session(config, web_search, viz, voice, list(files)))
 
 
 async def _vibe_session(
@@ -86,6 +99,7 @@ async def _vibe_session(
     web_search: bool,
     viz_enabled: bool,
     voice_enabled: bool,
+    initial_files: list[Path],
 ) -> None:
     """Main vibe session loop."""
     
@@ -122,10 +136,18 @@ async def _vibe_session(
         multiline=False,
         enable_suspend=True,
     )
+    output_writer = SessionOutputWriter()
+    history: list[dict] = []
     
     console.print("\n[bold cyan]🐡 Fugu Vibe Session Started[/bold cyan]")
     console.print("Type your prompt and press Enter")
-    console.print("Commands: /status /tasks /quit /help  |  Exit: Ctrl+C or Ctrl+D\n")
+    attached_files = [path.expanduser().resolve() for path in initial_files]
+
+    console.print("Commands: /attach /files /clear-files /status /tasks /quit /help")
+    console.print("Exit: Ctrl+C or Ctrl+D\n")
+    console.print(f"[dim]Session output: {output_writer.path}[/dim]")
+    if attached_files:
+        console.print(f"[dim]Attached {len(attached_files)} file(s). Use /files to list them.[/dim]\n")
     
     try:
         while True:
@@ -140,13 +162,20 @@ async def _vibe_session(
                 # Handle commands
                 if user_input.startswith("/"):
                     await _handle_command(
-                        user_input, task_manager, event_bus, dashboard
+                        user_input, task_manager, event_bus, dashboard, attached_files
                     )
                     continue
                 
                 # Send to Fugu
                 await _send_to_fugu(
-                    user_input, fugu_client, event_bus, config, web_search
+                    user_input,
+                    fugu_client,
+                    event_bus,
+                    config,
+                    web_search,
+                    attached_files,
+                    history,
+                    output_writer,
                 )
                 
             except KeyboardInterrupt:
@@ -173,16 +202,26 @@ async def _send_to_fugu(
     event_bus: EventBus,
     config: Config,
     web_search: bool,
+    files: list[Path],
+    history: list[dict],
+    output_writer: SessionOutputWriter,
 ) -> None:
     """Send a prompt to Fugu and stream the response."""
-    
-    messages = [{"role": "user", "content": prompt}]
+
+    content = build_content_parts(prompt, files) if files else prompt
+    user_message = {"role": "user", "content": content}
+    messages = [*history, user_message]
     
     # Initialize orchestration analyzer
     analyzer = OrchestrationAnalyzer(config, event_bus)
     
     console.print(f"\n[dim]> {prompt[:80]}{'...' if len(prompt) > 80 else ''}[/dim]")
+    if files:
+        names = ", ".join(path.name for path in files)
+        console.print(f"[dim]Attachments: {names}[/dim]")
     console.print("[dim]Thinking...[/dim]", end="")
+    output_writer.start_turn(prompt, files)
+    response_parts: list[str] = []
     
     try:
         async for chunk in client.send(
@@ -200,6 +239,8 @@ async def _send_to_fugu(
                     {"content": chunk.content},
                     source="vibe",
                 )
+                response_parts.append(chunk.content)
+                output_writer.append_response(chunk.content)
                 console.print(chunk.content, end="")
             elif chunk.type == "token_usage":
                 await event_bus.emit(
@@ -219,7 +260,12 @@ async def _send_to_fugu(
     except Exception as e:
         console.print(f"\n[red]Error: {e}[/red]")
     finally:
+        response = "".join(response_parts)
+        if response:
+            history.append(user_message)
+            history.append({"role": "assistant", "content": response})
         await analyzer.finalize()
+        output_writer.end_turn()
         console.print("\n")
 
 
@@ -228,6 +274,7 @@ async def _handle_command(
     task_manager: TaskManager,
     event_bus: EventBus,
     dashboard: OrchestrationDashboard | None,
+    attached_files: list[Path],
 ) -> None:
     """Handle slash commands."""
     parts = cmd.split()
@@ -245,11 +292,42 @@ async def _handle_command(
         for task in status["tasks"]:
             icon = "🔄" if task['status'] == 'running' else "✅" if task['status'] == 'completed' else "⏳"
             console.print(f"  {icon} {task['name']} [{task['status']}]")
+
+    elif command == "/attach":
+        for raw_path in _command_args(cmd):
+            path = Path(raw_path).expanduser().resolve()
+            if not path.is_file():
+                console.print(f"[red]Not a file:[/red] {raw_path}")
+                continue
+            if path not in attached_files:
+                attached_files.append(path)
+            console.print(f"[green]Attached:[/green] {path}")
+
+    elif command == "/files":
+        if not attached_files:
+            console.print("[dim]No files attached.[/dim]")
+        for index, path in enumerate(attached_files, start=1):
+            console.print(f"  {index}. {path}")
+
+    elif command == "/clear-files":
+        attached_files.clear()
+        console.print("[green]Cleared attached files.[/green]")
             
     elif command == "/help":
         console.print("\n[bold]Commands:[/bold]")
         console.print("  /quit, /q     - Exit session")
+        console.print("  /attach PATH  - Attach a PDF, image, or file")
+        console.print("  /files        - List attached files")
+        console.print("  /clear-files  - Remove all attached files")
         console.print("  /status       - Show system status")
         console.print("  /tasks        - List active tasks")
         console.print("  /help         - Show this help")
         console.print("")
+
+
+def _command_args(cmd: str) -> list[str]:
+    try:
+        return shlex.split(cmd)[1:]
+    except ValueError as e:
+        console.print(f"[red]Invalid command syntax:[/red] {e}")
+        return []

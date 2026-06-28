@@ -39,6 +39,8 @@ Thumbs.db
 
 # Project specific
 .fugu-vibe.toml
+.fugu-vibe/
+.fugu-worktrees/
 config.toml
 
 # Logs

@@ -22,12 +22,12 @@ import sys
 from pathlib import Path
 
 import click
-import structlog
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 from fugu_vibe.config import Config, load_config
+from fugu_vibe.utils.logging import setup_logging
 
 from fugu_vibe.cli.commands.vibe import vibe_command
 from fugu_vibe.cli.commands.submit import submit_command
@@ -40,7 +40,6 @@ from fugu_vibe.cli.commands.config import config_command
 from fugu_vibe.cli.commands.models import models_command
 from fugu_vibe.cli.commands.auth import auth_command
 
-logger = structlog.get_logger()
 console = Console()
 
 
@@ -91,6 +90,11 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         fugu-vibe vibe                          # Start interactive session
         fugu-vibe submit "Refactor auth" -p "..."  # Submit task
     """
+    setup_logging(verbose)
+
+    original_cwd = Path.cwd()
+    resolved_config_path = _resolve_config_path(config_path, original_cwd)
+
     if workspace_path:
         workspace = workspace_path.expanduser().resolve()
         if not workspace.exists() or not workspace.is_dir():
@@ -99,7 +103,7 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
 
     # Load configuration from the selected workspace unless --config is provided.
     config = load_config(
-        override_path=Path(config_path) if config_path else None
+        override_path=resolved_config_path
     )
     
     # Override with CLI options
@@ -118,12 +122,6 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
     ctx.obj["verbose"] = verbose
     ctx.obj["workspace"] = Path.cwd()
     
-    # Setup logging
-    if verbose:
-        structlog.configure(
-            wrapper_class=structlog.make_filtering_bound_logger(10),
-        )
-    
     # Print banner for top-level invocation
     if ctx.invoked_subcommand is None:
         print_banner()
@@ -134,6 +132,15 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         console.print("Quick start:")
         console.print("  ", style="dim")
         console.print("fugu-vibe vibe", style="bold green")
+
+
+def _resolve_config_path(config_path: str | None, cwd: Path) -> Path | None:
+    if not config_path:
+        return None
+    path = Path(config_path).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    return path.resolve()
 
 
 # Register commands

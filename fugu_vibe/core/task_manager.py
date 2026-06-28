@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import tempfile
 import time
@@ -27,6 +28,7 @@ import structlog
 from git import Repo
 from git.exc import GitCommandError
 
+from fugu_vibe.core.attachments import build_content_parts
 from fugu_vibe.core.event_bus import EventBus, EventType
 
 if TYPE_CHECKING:
@@ -95,7 +97,12 @@ class Task:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+        return self.status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.MERGED,
+        )
 
 
 class TaskManager:
@@ -140,6 +147,7 @@ class TaskManager:
         # State
         self._running = False
         self._scheduler_task: asyncio.Task | None = None
+        self._state_dir = Path.cwd() / ".fugu-vibe" / "tasks"
 
     async def start(self) -> None:
         """Initialize task manager and git repo."""
@@ -148,6 +156,8 @@ class TaskManager:
         
         # Initialize git
         self._init_git()
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        self._load_persisted_tasks()
         
         # Start scheduler
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -166,6 +176,7 @@ class TaskManager:
         for task_id, task in self._running_tasks.items():
             task.cancel()
             self._tasks[task_id].status = TaskStatus.CANCELLED
+            self._persist_task(self._tasks[task_id])
         
         if self._scheduler_task:
             self._scheduler_task.cancel()
@@ -230,6 +241,7 @@ class TaskManager:
         )
         
         self._tasks[task_id] = task
+        self._persist_task(task)
         
         # Build dependency graph
         for dep_id in task.depends_on:
@@ -242,6 +254,7 @@ class TaskManager:
             await self._queue.put(task_id)
         else:
             task.status = TaskStatus.PENDING
+        self._persist_task(task)
         
         await self._emit(EventType.TASK_CREATED, {"task_id": task_id, "name": name})
         logger.info("task_submitted", task_id=task_id, name=name, deps=task.depends_on)
@@ -273,6 +286,7 @@ class TaskManager:
             self._running_tasks[task_id].cancel()
         
         task.status = TaskStatus.CANCELLED
+        self._persist_task(task)
         await self._emit(EventType.TASK_CANCELLED, {"task_id": task_id})
         return True
 
@@ -319,6 +333,54 @@ class TaskManager:
             wt_path = Path(tempfile.mkdtemp(prefix=f"fugu-{task.task_id}-"))
         
         return str(wt_path)
+
+    def _load_persisted_tasks(self) -> None:
+        for path in self._state_dir.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                task = Task(
+                    task_id=data["task_id"],
+                    name=data.get("name", ""),
+                    description=data.get("description", ""),
+                    prompt=data.get("prompt", ""),
+                    model=data.get("model", self.config.model.default),
+                    effort=data.get("effort", self.config.model.reasoning_effort),
+                    web_search=data.get("web_search", False),
+                    files=data.get("files", []),
+                    depends_on=data.get("depends_on", []),
+                    branch=data.get("branch", ""),
+                    worktree_path=data.get("worktree", ""),
+                    status=TaskStatus(data.get("status", "pending")),
+                    output=data.get("output", ""),
+                    error=data.get("error", ""),
+                    token_usage=data.get("token_usage", {}),
+                    metadata=data.get("metadata", {}),
+                )
+                for attr in ("created_at", "started_at", "completed_at"):
+                    value = data.get(attr)
+                    if value:
+                        setattr(task, attr, datetime.fromisoformat(value))
+                self._tasks[task.task_id] = task
+            except Exception as e:
+                logger.warning("task_state_load_failed", path=str(path), error=str(e))
+
+    def _persist_task(self, task: Task) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        path = self._state_dir / f"{task.task_id}.json"
+        data = self._task_to_dict(task)
+        data.update(
+            {
+                "prompt": task.prompt,
+                "web_search": task.web_search,
+                "files": task.files,
+                "output": task.output,
+                "error": task.error,
+                "metadata": task.metadata,
+            }
+        )
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(path)
 
     def _merge_worktree(self, task: Task) -> bool:
         """Merge completed task back to main branch."""
@@ -368,6 +430,7 @@ class TaskManager:
         task = self._tasks[task_id]
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.now()
+        self._persist_task(task)
         
         await self._emit(EventType.TASK_STARTED, {"task_id": task_id})
         
@@ -376,7 +439,9 @@ class TaskManager:
             task.worktree_path = self._create_worktree(task)
             
             # Build messages
-            messages = [{"role": "user", "content": task.prompt}]
+            attachment_paths = [Path(file_path) for file_path in task.files]
+            content = build_content_parts(task.prompt, attachment_paths) if attachment_paths else task.prompt
+            messages = [{"role": "user", "content": content}]
             
             # Execute via Fugu client
             output_parts = []
@@ -404,10 +469,12 @@ class TaskManager:
             task.output = "".join(output_parts)
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
+            self._persist_task(task)
             
             # Auto-merge if enabled
             if self.task_config.auto_merge:
                 self._merge_worktree(task)
+                self._persist_task(task)
             
             await self._emit(EventType.TASK_COMPLETED, {
                 "task_id": task_id,
@@ -425,6 +492,7 @@ class TaskManager:
             task.status = TaskStatus.FAILED
             task.error = str(e)
             task.completed_at = datetime.now()
+            self._persist_task(task)
             await self._emit(EventType.TASK_FAILED, {"task_id": task_id, "error": str(e)})
             logger.error("task_failed", task_id=task_id, error=str(e))
         finally:
@@ -437,6 +505,7 @@ class TaskManager:
                 task = self._tasks[dependent_id]
                 if task.status == TaskStatus.PENDING and self._is_ready(dependent_id):
                     task.status = TaskStatus.QUEUED
+                    self._persist_task(task)
                     await self._queue.put(dependent_id)
 
     async def _emit(self, event_type: EventType, data: dict[str, Any]) -> None:

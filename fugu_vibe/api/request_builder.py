@@ -95,21 +95,20 @@ class FuguRequestBuilder:
             custom_instructions=custom_instructions,
         )
 
+        input_payload: Any = messages[-1]["content"] if messages else ""
+        if len(messages) > 1 or _has_multimodal_content(messages):
+            input_payload = messages
+
         # Construct request body per Sakana Responses API spec
         body: dict[str, Any] = {
             "model": model,
-            "input": messages[-1]["content"] if messages else "",
+            "input": input_payload,
             "instructions": final_instructions,
             "reasoning": {"effort": effort},
             "stream": stream,
             "max_output_tokens": max_output_tokens,
             "truncation": truncation,
         }
-
-        # Add full conversation history as previous items
-        if len(messages) > 1:
-            body["previous_response_id"] = None  # Signal: using full history
-            body["input"] = messages  # Send full messages array
 
         # Add tools
         if tool_list:
@@ -148,7 +147,6 @@ class FuguRequestBuilder:
         )
 
         return body
-
     def _build_instructions(
         self,
         instructions: str | None,
@@ -203,3 +201,7 @@ class FuguRequestBuilder:
             body["tools"] = tools
 
         return body
+
+
+def _has_multimodal_content(messages: list[dict[str, Any]]) -> bool:
+    return any(isinstance(message.get("content"), list) for message in messages)

@@ -24,7 +24,13 @@ console = Console()
 @click.option("--effort", "-e", type=click.Choice(["high", "xhigh", "max"]), help="Reasoning effort")
 @click.option("--web-search", "-w", is_flag=True, help="Enable web search")
 @click.option("--depends-on", multiple=True, help="Task IDs this task depends on")
-@click.option("--files", "-f", multiple=True, help="Files to include in context")
+@click.option(
+    "--files",
+    "-f",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Files to include in context",
+)
 @click.option("--wait", is_flag=True, help="Wait for task to complete")
 @click.option("--unlimited", "-u", is_flag=True, help="Unlimited prompt mode")
 @click.pass_context
@@ -98,19 +104,19 @@ async def _submit(
             while not task.is_terminal:
                 await asyncio.sleep(1)
             
-            if task.status.value == "completed":
-                console.print(f"\n[green]✅ Completed[/green] ({task.duration:.1f}s)")
+            if task.status.value in ("completed", "merged"):
+                console.print(f"\n[green]✅ {task.status.value.title()}[/green] ({task.duration:.1f}s)")
                 if task.output:
                     console.print(Markdown(task.output))
             else:
                 console.print(f"\n[red]❌ Failed:[/red] {task.error}")
         else:
-            console.print(f"\nRun `fugu-vibe status {task.task_id}` to check progress")
+            console.print(f"\nRun `fugu-vibe status {task.task_id}` from another terminal to check progress")
             
     finally:
         if not wait:
-            # Keep running for background tasks
-            console.print("[dim]Task running in background. Press Ctrl+C to exit.[/dim]")
+            # Keep this process alive; there is no daemon yet.
+            console.print("[dim]Task running in this process. Press Ctrl+C to stop it.[/dim]")
             try:
                 while True:
                     await asyncio.sleep(1)
