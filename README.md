@@ -1,5 +1,7 @@
 # 🐡 Fugu Vibe CLI
 
+**English** | [中文](README.zh.md) | [日本語](README.ja.md)
+
 A specialized CLI for **Sakana Fugu** vibe coding with async voice control, agent orchestration visualization, and unlimited prompt mode.
 
 > **Fugu** is Sakana AI's learned multi-agent orchestration system that dynamically routes between 1-3 expert agents per request. This CLI is designed to fully leverage Fugu's unique architecture.
