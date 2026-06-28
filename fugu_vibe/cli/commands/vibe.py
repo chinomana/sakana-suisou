@@ -20,6 +20,7 @@ from rich.markdown import Markdown
 
 from fugu_vibe.api.client import FuguClient
 from fugu_vibe.core.event_bus import EventBus, EventType
+from fugu_vibe.core.event_log import EventLogWriter
 from fugu_vibe.core.orchestration import OrchestrationAnalyzer
 from fugu_vibe.core.task_manager import TaskManager
 from fugu_vibe.ui.dashboard import OrchestrationDashboard
@@ -90,6 +91,8 @@ async def _vibe_session(
     
     # Initialize components
     event_bus = EventBus()
+    event_log = EventLogWriter(event_bus)
+    event_log.start()
     await event_bus.start()
     
     fugu_client = FuguClient(config)
@@ -192,8 +195,23 @@ async def _send_to_fugu(
             event = await analyzer.analyze_chunk(chunk)
             
             if chunk.type == "content":
+                await event_bus.emit(
+                    EventType.STREAM_CONTENT,
+                    {"content": chunk.content},
+                    source="vibe",
+                )
                 console.print(chunk.content, end="")
             elif chunk.type == "token_usage":
+                await event_bus.emit(
+                    EventType.STREAM_TOKEN_USAGE,
+                    {
+                        "input_tokens": chunk.token_usage.input_tokens,
+                        "output_tokens": chunk.token_usage.output_tokens,
+                        "orchestration_tokens": chunk.token_usage.orchestration_tokens,
+                        "total_tokens": chunk.token_usage.total_tokens,
+                    },
+                    source="vibe",
+                )
                 orch = chunk.token_usage.orchestration_tokens
                 if orch > 0:
                     console.print(f"\n[dim](orch: {orch} tokens)[/dim]")

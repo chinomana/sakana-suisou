@@ -87,6 +87,18 @@ fugu-vibe vibe --unlimited
 fugu-vibe vibe --viz
 ```
 
+你也可以在一个终端保持 `vibe` 运行，同时在另一个终端打开同一工作区的仪表盘：
+
+```bash
+# 终端 1：正常工作
+fugu-vibe -C /path/to/project vibe
+
+# 终端 2：监视该工作区的仪表盘
+fugu-vibe -C /path/to/project dashboard
+```
+
+双终端仪表盘读取所选工作区中的 `.fugu-vibe/events.jsonl`。它只显示 `vibe` 启动后产生的事件。
+
 ## 在特定工作区中工作
 
 在子命令之前使用 `-C/--workspace`：

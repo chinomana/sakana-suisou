@@ -7,6 +7,7 @@ Commands:
     status    Show task status
     attach    Attach to a running task
     cancel    Cancel a task
+    dashboard View a running workspace dashboard
     voice     Voice-controlled task submission
     config    Manage configuration
     models    List available models
@@ -33,6 +34,7 @@ from fugu_vibe.cli.commands.submit import submit_command
 from fugu_vibe.cli.commands.status import status_command
 from fugu_vibe.cli.commands.attach import attach_command
 from fugu_vibe.cli.commands.cancel import cancel_command
+from fugu_vibe.cli.commands.dashboard import dashboard_command
 from fugu_vibe.cli.commands.voice import voice_command
 from fugu_vibe.cli.commands.config import config_command
 from fugu_vibe.cli.commands.models import models_command
@@ -140,6 +142,7 @@ cli.add_command(submit_command, name="submit")
 cli.add_command(status_command, name="status")
 cli.add_command(attach_command, name="attach")
 cli.add_command(cancel_command, name="cancel")
+cli.add_command(dashboard_command, name="dashboard")
 cli.add_command(voice_command, name="voice")
 cli.add_command(config_command, name="config")
 cli.add_command(models_command, name="models")

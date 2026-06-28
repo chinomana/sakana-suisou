@@ -87,6 +87,18 @@ fugu-vibe vibe --unlimited
 fugu-vibe vibe --viz
 ```
 
+同じワークスペースで、`vibe` を一つのターミナルで実行しながら、別のターミナルでダッシュボードを開くことも可能：
+
+```bash
+# ターミナル 1: 通常作業
+fugu-vibe -C /path/to/project vibe
+
+# ターミナル 2: そのワークスペースのダッシュボードを監視
+fugu-vibe -C /path/to/project dashboard
+```
+
+2 ターミナルダッシュボードは、選択したワークスペースの `.fugu-vibe/events.jsonl` を読み込む。`vibe` 起動後に生成されたイベントのみを表示する。
+
 ## 特定のワークスペースで作業
 
 サブコマンドの前に `-C/--workspace` を使用：

@@ -87,6 +87,18 @@ Enable the dashboard only when you want it:
 fugu-vibe vibe --viz
 ```
 
+You can also keep `vibe` in one terminal and open the dashboard in another terminal for the same workspace:
+
+```bash
+# Terminal 1: work normally
+fugu-vibe -C /path/to/project vibe
+
+# Terminal 2: watch the dashboard for that workspace
+fugu-vibe -C /path/to/project dashboard
+```
+
+The two-terminal dashboard reads `.fugu-vibe/events.jsonl` in the selected workspace. It only shows events produced after `vibe` starts.
+
 ## Working In A Specific Workspace
 
 Use `-C/--workspace` before the subcommand:
