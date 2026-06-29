@@ -157,4 +157,13 @@ git_default_branch = "{config.tasks.git_default_branch}"
 [prompt]
 unlimited_mode = {str(config.prompt.unlimited_mode).lower()}
 custom_instructions = "{config.prompt.custom_instructions or ''}"
+
+[tools]
+terminal_enabled = {str(config.tools.terminal_enabled).lower()}
+terminal_approval = "{config.tools.terminal_approval}"
+terminal_timeout_seconds = {config.tools.terminal_timeout_seconds}
+max_output_chars = {config.tools.max_output_chars}
+
+[patch]
+mode = "{config.patch.mode}"
 """

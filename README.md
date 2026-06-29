@@ -74,6 +74,15 @@ fugu-vibe vibe
 Inside the session:
 
 - Type a prompt and press Enter.
+- Use `/context` to inspect current prompt context.
+- Use `/compact` to compact older conversation turns into a local summary.
+- Use `/ls [glob]`, `/read <path>`, and `/search <query> [glob]` to inspect workspace files safely.
+- Use `/diff` to inspect current git diff.
+- Use `/apply <patch-file>` to check and apply a unified diff under the configured patch policy.
+- Use `/tools` to inspect local tool policy.
+- Use `/terminal <command>` to run a workspace terminal command only when terminal tools are explicitly enabled.
+- Use `/attach <path>` to add PDF/image/file context.
+- Use `/files` and `/clear-files` to inspect or clear attached files.
 - Use `/status` to show task status.
 - Use `/tasks` to list active tasks.
 - Use `/help` to show session commands.
@@ -105,6 +114,35 @@ Session transcripts are written to:
 ```text
 .fugu-vibe/sessions/<timestamp>.md
 ```
+
+Current context metadata is written to:
+
+```text
+.fugu-vibe/context/current.json
+```
+
+Workspace file inspection commands are read-only and constrained to the selected workspace. They skip runtime/cache directories such as `.git/`, `.fugu-vibe/`, `.venv/`, and `node_modules/`.
+
+The interactive session can execute Fugu function calls for read-only file tools (`file.list`, `file.read`, `file.search`). Terminal execution is not exposed for automatic model calls.
+
+Terminal execution is disabled by default. To enable manual terminal runs in `vibe`, set:
+
+```toml
+[tools]
+terminal_enabled = true
+terminal_approval = "ask"
+```
+
+Then use:
+
+```text
+/tools
+/terminal git status
+```
+
+The terminal tool is constrained to the workspace, blocks common destructive command patterns, applies a timeout, truncates displayed output, and saves full logs under `.fugu-vibe/tool-runs/`. Fugu does not yet invoke terminal tools automatically.
+
+Patch application defaults to `ask-apply`. `/apply <patch-file>` validates patch paths, runs `git apply --check`, shows the diff, and asks for `yes` before applying. Set `[patch] mode = "propose-only"` to disable applying patches from the CLI.
 
 Enable the dashboard only when you want it:
 
@@ -248,6 +286,8 @@ Default CLI output is kept quiet. Use `--verbose` before the subcommand to show 
 ```bash
 fugu-vibe --verbose vibe
 ```
+
+Local terminal tools are disabled by default. Patch application policy defaults to `ask-apply`; future patch tooling should show a diff and ask before modifying files.
 
 ```bash
 uv venv .venv --python 3.12

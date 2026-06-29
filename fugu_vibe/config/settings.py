@@ -99,6 +99,25 @@ class PromptConfig(BaseSettings):
     preserve_full_history: bool = True  # Send full history (no previous_response_id)
 
 
+class ToolConfig(BaseSettings):
+    """Local tool execution policy."""
+
+    model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_TOOLS_")
+
+    terminal_enabled: bool = False
+    terminal_approval: Literal["off", "ask", "auto-safe"] = "off"
+    terminal_timeout_seconds: int = 120
+    max_output_chars: int = 20_000
+
+
+class PatchConfig(BaseSettings):
+    """Patch application policy."""
+
+    model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_PATCH_")
+
+    mode: Literal["propose-only", "ask-apply", "auto-apply-safe"] = "ask-apply"
+
+
 class Config(BaseSettings):
     """Root configuration for Fugu Vibe CLI."""
 
@@ -113,6 +132,8 @@ class Config(BaseSettings):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     tasks: TaskConfig = Field(default_factory=TaskConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
+    tools: ToolConfig = Field(default_factory=ToolConfig)
+    patch: PatchConfig = Field(default_factory=PatchConfig)
 
     @classmethod
     def from_file(cls, path: Path) -> Config:

@@ -134,6 +134,16 @@ class StreamParser:
                     },
                 )
 
+        if event_type == "response.function_call_arguments.done":
+            return StreamChunk(
+                type="tool_call",
+                tool_call={
+                    "name": event.get("name", ""),
+                    "arguments": event.get("arguments", ""),
+                    "call_id": event.get("call_id", ""),
+                },
+            )
+
         if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response", {})
             chunk = StreamChunk(
