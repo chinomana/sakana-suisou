@@ -95,9 +95,7 @@ class FuguRequestBuilder:
             custom_instructions=custom_instructions,
         )
 
-        input_payload: Any = messages[-1]["content"] if messages else ""
-        if len(messages) > 1 or _has_multimodal_content(messages):
-            input_payload = messages
+        input_payload = _responses_input_payload(messages)
 
         # Construct request body per Sakana Responses API spec
         body: dict[str, Any] = {
@@ -205,3 +203,22 @@ class FuguRequestBuilder:
 
 def _has_multimodal_content(messages: list[dict[str, Any]]) -> bool:
     return any(isinstance(message.get("content"), list) for message in messages)
+
+
+def _responses_input_payload(messages: list[dict[str, Any]]) -> Any:
+    if not messages:
+        return ""
+    if _can_send_single_text_input(messages):
+        return messages[0]["content"]
+    return messages
+
+
+def _can_send_single_text_input(messages: list[dict[str, Any]]) -> bool:
+    if len(messages) != 1:
+        return False
+    message = messages[0]
+    return (
+        set(message.keys()) >= {"role", "content"}
+        and isinstance(message.get("content"), str)
+        and not _has_multimodal_content(messages)
+    )

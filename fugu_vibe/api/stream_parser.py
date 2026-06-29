@@ -33,6 +33,7 @@ class StreamChunk:
     # Content
     content: str = ""
     tool_call: dict = field(default_factory=dict)
+    output_item: dict = field(default_factory=dict)
     
     # Token tracking
     token_usage: TokenUsage = field(default_factory=TokenUsage)
@@ -66,6 +67,8 @@ class StreamParser:
     def __init__(self):
         self._buffer = ""
         self._current_tool_call: dict | None = None
+        self._response_items: dict[str, dict[str, Any]] = {}
+        self._function_arguments: dict[str, str] = {}
 
     def parse_sse_chunk(self, data: str) -> StreamChunk | None:
         """
@@ -111,18 +114,39 @@ class StreamParser:
     ) -> StreamChunk | None:
         """Parse streaming Responses API typed events."""
         if event_type in ("response.output_text.delta", "response.refusal.delta"):
-            return StreamChunk(type="content", content=event.get("delta", ""))
+            return StreamChunk(
+                type="content",
+                content=event.get("delta", ""),
+                output_item=self._content_output_item(event),
+            )
 
         if event_type == "response.reasoning_summary_text.delta":
             return StreamChunk(type="reasoning", content=event.get("delta", ""))
 
+        if event_type == "response.output_item.added":
+            item = event.get("item", {})
+            item_id = item.get("id") or event.get("item_id")
+            if item_id:
+                self._response_items[item_id] = item
+            return None
+
+        if event_type == "response.function_call_arguments.delta":
+            item_id = event.get("item_id")
+            if item_id:
+                self._function_arguments[item_id] = self._function_arguments.get(item_id, "") + event.get("delta", "")
+            return None
+
         if event_type == "response.output_item.done":
             item = event.get("item", {})
+            item_id = item.get("id") or event.get("item_id")
+            if item_id and item_id in self._function_arguments:
+                item = {**item, "arguments": self._function_arguments[item_id]}
             item_type = item.get("type", "")
             if item_type == "web_search_call":
                 return StreamChunk(
                     type="tool_call",
                     tool_call={"name": "web_search", "arguments": item},
+                    output_item=item,
                 )
             if item_type == "function_call":
                 return StreamChunk(
@@ -131,17 +155,31 @@ class StreamParser:
                         "name": item.get("name", ""),
                         "arguments": item.get("arguments", ""),
                         "call_id": item.get("call_id", ""),
+                        "id": item.get("id", ""),
                     },
+                    output_item=item,
                 )
 
         if event_type == "response.function_call_arguments.done":
+            item_id = event.get("item_id")
+            cached_item = self._response_items.get(item_id or "", {})
+            arguments = event.get("arguments", "") or self._function_arguments.get(item_id or "", "")
+            output_item = {
+                **cached_item,
+                "type": "function_call",
+                "name": event.get("name") or cached_item.get("name", ""),
+                "arguments": arguments,
+                "call_id": event.get("call_id") or cached_item.get("call_id", ""),
+            }
             return StreamChunk(
                 type="tool_call",
                 tool_call={
-                    "name": event.get("name", ""),
-                    "arguments": event.get("arguments", ""),
-                    "call_id": event.get("call_id", ""),
+                    "name": output_item.get("name", ""),
+                    "arguments": output_item.get("arguments", ""),
+                    "call_id": output_item.get("call_id", ""),
+                    "id": output_item.get("id", ""),
                 },
+                output_item=output_item,
             )
 
         if event_type in ("response.completed", "response.incomplete"):
@@ -196,6 +234,7 @@ class StreamParser:
                         "name": "web_search",
                         "arguments": item,
                     }
+                    chunk.output_item = item
                     
                 elif item_type == "function_call":
                     chunk.type = "tool_call"
@@ -203,7 +242,9 @@ class StreamParser:
                         "name": item.get("name", ""),
                         "arguments": item.get("arguments", ""),
                         "call_id": item.get("call_id", ""),
+                        "id": item.get("id", ""),
                     }
+                    chunk.output_item = item
         
         # Extract usage with orchestration tokens
         usage = event.get("usage", {})
@@ -222,6 +263,14 @@ class StreamParser:
         chunk.finish_reason = event.get("status", "")
         
         return chunk if chunk.type else None
+
+    def _content_output_item(self, event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": "message",
+            "id": event.get("item_id", ""),
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": event.get("delta", "")}],
+        }
 
     def _parse_chat_completions(self, event: dict[str, Any]) -> StreamChunk | None:
         """Parse Chat Completions streaming format."""

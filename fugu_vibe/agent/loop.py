@@ -50,6 +50,7 @@ class AgentLoop:
             result.rounds = round_index + 1
             content_parts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
+            output_items: list[dict[str, Any]] = []
 
             async for chunk in self.client.send(
                 messages=current_messages,
@@ -69,6 +70,8 @@ class AgentLoop:
                     )
                 elif chunk.type == "tool_call":
                     tool_calls.append(chunk.tool_call)
+                    if chunk.output_item:
+                        output_items.append(chunk.output_item)
                     result.tool_calls.append(chunk.tool_call)
                     if on_tool_call:
                         on_tool_call(chunk.tool_call)
@@ -99,6 +102,8 @@ class AgentLoop:
 
             if content:
                 current_messages.append({"role": "assistant", "content": content})
+            call_items = self._tool_call_items(tool_calls, output_items)
+            current_messages.extend(call_items)
             for tool_call in tool_calls:
                 tool_result = await self.registry.dispatch(
                     str(tool_call.get("name", "")),
@@ -119,3 +124,26 @@ class AgentLoop:
             "call_id": call_id,
             "output": json.dumps(tool_result, ensure_ascii=False),
         }
+
+    def _tool_call_items(
+        self,
+        tool_calls: list[dict[str, Any]],
+        output_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        by_call_id = {item.get("call_id"): item for item in output_items if item.get("call_id")}
+        items: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            call_id = tool_call.get("call_id") or tool_call.get("id") or ""
+            item = by_call_id.get(call_id)
+            if item:
+                items.append(item)
+                continue
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": tool_call.get("name", ""),
+                    "arguments": tool_call.get("arguments", ""),
+                }
+            )
+        return items

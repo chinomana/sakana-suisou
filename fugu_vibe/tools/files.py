@@ -24,6 +24,8 @@ DEFAULT_EXCLUDES = {
 
 MAX_READ_BYTES = 512 * 1024
 MAX_SEARCH_BYTES = 256 * 1024
+DEFAULT_READ_LINES = 200
+MAX_READ_LINES = 500
 
 
 class FileToolError(Exception):
@@ -50,7 +52,13 @@ class FileTools:
             results.append(self._relative(path))
         return results
 
-    def read_file(self, path: str | Path, max_bytes: int = MAX_READ_BYTES) -> str:
+    def read_file(
+        self,
+        path: str | Path,
+        max_bytes: int = MAX_READ_BYTES,
+        start_line: int = 1,
+        limit: int | None = None,
+    ) -> str:
         """Read a UTF-8 text file from the workspace."""
         resolved = self._resolve(path)
         if not resolved.is_file():
@@ -61,9 +69,17 @@ class FileTools:
         if size > max_bytes:
             raise FileToolError(f"File is too large to read ({size} bytes): {path}")
         try:
-            return resolved.read_text(encoding="utf-8")
+            content = resolved.read_text(encoding="utf-8")
         except UnicodeDecodeError as e:
             raise FileToolError(f"File is not UTF-8 text: {path}") from e
+        if limit is None:
+            return content
+        if start_line < 1:
+            raise FileToolError("start_line must be >= 1")
+        limit = min(limit, MAX_READ_LINES)
+        lines = content.splitlines()
+        selected = lines[start_line - 1 : start_line - 1 + limit]
+        return "\n".join(selected) + ("\n" if selected else "")
 
     def search(
         self,

@@ -28,7 +28,9 @@ class ToolRegistry:
                         "pattern": {"type": "string", "default": "**/*"},
                         "limit": {"type": "integer", "default": 200},
                     },
+                    "additionalProperties": False,
                 },
+                "strict": True,
             },
             {
                 "type": "function",
@@ -36,9 +38,15 @@ class ToolRegistry:
                 "description": "Read a UTF-8 text file from the workspace. Read-only.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer", "default": 1},
+                        "limit": {"type": "integer", "default": 200},
+                    },
                     "required": ["path"],
+                    "additionalProperties": False,
                 },
+                "strict": True,
             },
             {
                 "type": "function",
@@ -52,7 +60,9 @@ class ToolRegistry:
                         "limit": {"type": "integer", "default": 50},
                     },
                     "required": ["query"],
+                    "additionalProperties": False,
                 },
+                "strict": True,
             },
         ]
 
@@ -66,7 +76,11 @@ class ToolRegistry:
                 )
                 return {"ok": True, "files": files, "count": len(files)}
             if name == "file.read":
-                content = self.file_tools.read_file(Path(str(args["path"])))
+                content = self.file_tools.read_file(
+                    Path(str(args["path"])),
+                    start_line=int(args.get("start_line", 1)),
+                    limit=int(args.get("limit", 200)),
+                )
                 return {"ok": True, "path": str(args["path"]), "content": content}
             if name == "file.search":
                 matches = self.file_tools.search(
