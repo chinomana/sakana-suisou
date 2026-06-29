@@ -54,6 +54,13 @@ class AgentLoop:
             tool_calls: list[dict[str, Any]] = []
             output_items: list[dict[str, Any]] = []
             local_tools = self.registry.schemas() if allow_tools else None
+            await self.event_bus.emit(
+                EventType.STREAM_REASONING,
+                {
+                    "content": f"Starting agent round {round_index + 1} ({'tools enabled' if local_tools else 'tools disabled'})",
+                },
+                source="agent_loop",
+            )
 
             async for chunk in self.client.send(
                 messages=current_messages,
@@ -64,6 +71,17 @@ class AgentLoop:
             ):
                 if chunk.type == "content":
                     content_parts.append(chunk.content)
+                    await self.event_bus.emit(
+                        EventType.STREAM_CONTENT,
+                        {"content": chunk.content, "provisional": True},
+                        source="agent_loop",
+                    )
+                elif chunk.type == "reasoning":
+                    await self.event_bus.emit(
+                        EventType.STREAM_REASONING,
+                        {"content": chunk.content},
+                        source="agent_loop",
+                    )
                 elif chunk.type == "tool_call":
                     tool_calls.append(chunk.tool_call)
                     if chunk.output_item:
@@ -128,6 +146,15 @@ class AgentLoop:
                     str(tool_call.get("name", "")),
                     tool_call.get("arguments", ""),
                 )
+                await self.event_bus.emit(
+                    EventType.STREAM_TOOL_RESULT,
+                    {
+                        "tool_call": tool_call,
+                        "ok": bool(tool_result.get("ok")),
+                        "summary": self._tool_result_summary(tool_result),
+                    },
+                    source="agent_loop",
+                )
                 current_messages.append(self._tool_result_message(tool_call, tool_result))
             current_messages.append(
                 {
@@ -181,3 +208,15 @@ class AgentLoop:
         except json.JSONDecodeError:
             parsed = arguments
         return name, json.dumps(parsed, sort_keys=True, ensure_ascii=False)
+
+    def _tool_result_summary(self, tool_result: dict[str, Any]) -> str:
+        if not tool_result.get("ok"):
+            return str(tool_result.get("error", "tool failed"))
+        if "files" in tool_result:
+            return f"{tool_result.get('count', len(tool_result.get('files', [])))} files"
+        if "matches" in tool_result:
+            return f"{tool_result.get('count', len(tool_result.get('matches', [])))} matches"
+        if "content" in tool_result:
+            content = str(tool_result.get("content", ""))
+            return f"read {len(content)} chars from {tool_result.get('path', 'file')}"
+        return "ok"

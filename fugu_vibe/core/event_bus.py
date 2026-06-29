@@ -28,6 +28,7 @@ class EventType(Enum):
     STREAM_CONTENT = "stream:content"
     STREAM_REASONING = "stream:reasoning"
     STREAM_TOOL_CALL = "stream:tool_call"
+    STREAM_TOOL_RESULT = "stream:tool_result"
     STREAM_TOKEN_USAGE = "stream:token_usage"
     STREAM_DONE = "stream:done"
     STREAM_ERROR = "stream:error"

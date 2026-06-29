@@ -112,6 +112,7 @@ class OrchestrationDashboard:
         self.event_bus.on(EventType.STREAM_CONTENT, self._on_content)
         self.event_bus.on(EventType.STREAM_REASONING, self._on_reasoning)
         self.event_bus.on(EventType.STREAM_TOOL_CALL, self._on_tool_call)
+        self.event_bus.on(EventType.STREAM_TOOL_RESULT, self._on_tool_result)
         self.event_bus.on(EventType.STREAM_TOKEN_USAGE, self._on_stream_token_usage)
         self.event_bus.on(EventType.TOKEN_UPDATE, self._on_token_update)
         self.event_bus.on(EventType.TASK_CREATED, self._on_task_update)
@@ -261,7 +262,11 @@ class OrchestrationDashboard:
     def _on_content(self, event: Event) -> None:
         content = event.data.get("content", "")
         if content:
-            self._stream_content.extend(content.split("\n"))
+            prefix = "[stream] " if event.data.get("provisional") else ""
+            lines = content.split("\n")
+            if lines:
+                lines[0] = prefix + lines[0]
+            self._stream_content.extend(lines)
 
     def _on_reasoning(self, event: Event) -> None:
         content = event.data.get("content", "")
@@ -272,6 +277,13 @@ class OrchestrationDashboard:
         tool_call = event.data.get("tool_call", {})
         name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else "unknown"
         self._stream_content.append(f"[tool] {name}")
+
+    def _on_tool_result(self, event: Event) -> None:
+        tool_call = event.data.get("tool_call", {})
+        name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else "unknown"
+        status = "ok" if event.data.get("ok") else "error"
+        summary = event.data.get("summary", "")
+        self._stream_content.append(f"[tool:{status}] {name} {summary}".rstrip())
 
     def _on_stream_token_usage(self, event: Event) -> None:
         self.token_meter.update(
