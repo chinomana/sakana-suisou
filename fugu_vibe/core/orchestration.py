@@ -22,6 +22,7 @@ import structlog
 
 from fugu_vibe.api.stream_parser import StreamChunk, TokenUsage
 from fugu_vibe.core.event_bus import EventBus, EventType
+from fugu_vibe.core.token_budget import TokenBudget, TokenBudgetAlert
 
 if TYPE_CHECKING:
     from fugu_vibe.config import Config
@@ -70,6 +71,7 @@ class OrchestrationState:
     current_worker: WorkerInfo | None = None
     verification_count: int = 0
     token_usage: TokenUsage = field(default_factory=TokenUsage)
+    last_budget_alert: TokenBudgetAlert | None = None
 
     @property
     def elapsed(self) -> float:
@@ -134,6 +136,8 @@ class OrchestrationAnalyzer:
         self.config = config
         self.event_bus = event_bus
         self.state = OrchestrationState()
+        self.token_budget = self._build_token_budget(config)
+        self._last_alert_level: str | None = None
 
         # Signal buffers
         self._token_buffer: deque[tuple[float, int]] = deque(maxlen=1000)
@@ -148,6 +152,16 @@ class OrchestrationAnalyzer:
         self._verification_detected = False
 
         logger.info("orchestration_analyzer_initialized")
+
+    def _build_token_budget(self, config: Config | None) -> TokenBudget | None:
+        if config is None:
+            return None
+        return TokenBudget(
+            max_total_tokens=config.orchestration.token_budget,
+            max_orchestration_ratio=config.orchestration.max_orchestration_ratio,
+            warning_ratio=config.orchestration.token_budget_warning_ratio,
+            cost_per_million_tokens=config.orchestration.cost_per_million_tokens,
+        )
 
     async def analyze_chunk(self, chunk: StreamChunk) -> OrchestrationEvent | None:
         """
@@ -164,12 +178,18 @@ class OrchestrationAnalyzer:
             if initial_delay > self.ROUTING_DELAY_THRESHOLD and not self._routing_detected:
                 return await self._detect_routing(chunk, initial_delay)
 
+        if chunk.type == "routing_signal":
+            return await self._handle_routing_signal(chunk)
+        if chunk.type == "worker_signal":
+            return await self._handle_worker_signal(now, chunk)
+
         # Track token usage
         if chunk.type == "token_usage" and chunk.token_usage:
             self.state.token_usage.update(chunk.token_usage)
             if chunk.routing_confidence:
                 self.state.routing_confidence = chunk.routing_confidence
             await self._emit_token_update()
+            await self._check_token_budget()
 
         # Content analysis
         if chunk.type == "content":
@@ -211,6 +231,40 @@ class OrchestrationAnalyzer:
             details={"delay_seconds": delay, "inferred": True},
         )
 
+        await self._emit_event(event)
+        return event
+
+    async def _handle_routing_signal(self, chunk: StreamChunk) -> OrchestrationEvent:
+        """Use explicit Fugu routing stream metadata when present."""
+        self._routing_detected = True
+        self.state.phase = OrchestrationPhase.ROUTING
+        self.state.routing_confidence = chunk.routing_confidence
+        event = OrchestrationEvent(
+            phase=OrchestrationPhase.ROUTING,
+            timestamp=time.monotonic(),
+            message=chunk.content or "Fugu routing",
+            confidence=chunk.routing_confidence,
+            details={"explicit_signal": True},
+        )
+        await self._emit_event(event)
+        return event
+
+    async def _handle_worker_signal(self, now: float, chunk: StreamChunk) -> OrchestrationEvent:
+        """Use explicit Fugu worker stream metadata when present."""
+        self.state.phase = OrchestrationPhase.WORKER_ACTIVE
+        worker_id = chunk.worker_id or f"W{self._worker_count + 1}"
+        worker = WorkerInfo(worker_id=worker_id, inferred_model=self.state.routing_model or "unknown")
+        self._worker_count += 1
+        self.state.workers.append(worker)
+        self.state.current_worker = worker
+        event = OrchestrationEvent(
+            phase=OrchestrationPhase.WORKER_ACTIVE,
+            timestamp=now,
+            message=chunk.content or f"Worker {worker_id} active",
+            worker_id=worker_id,
+            model=worker.inferred_model,
+            details={"explicit_signal": True},
+        )
         await self._emit_event(event)
         return event
 
@@ -338,6 +392,24 @@ class OrchestrationAnalyzer:
                 source="orchestration_analyzer",
             )
 
+    async def _check_token_budget(self) -> None:
+        """Emit a budget alert when token usage crosses configured thresholds."""
+        if self.token_budget is None:
+            return
+        alert = self.token_budget.check(self.state.token_usage)
+        if alert is None:
+            return
+        if alert.level == self._last_alert_level and self.state.last_budget_alert:
+            return
+        self._last_alert_level = alert.level
+        self.state.last_budget_alert = alert
+        if self.event_bus:
+            await self.event_bus.emit(
+                EventType.STREAM_TOKEN_USAGE,
+                data={"budget_alert": alert.to_dict()},
+                source="orchestration_analyzer",
+            )
+
     async def finalize(self) -> OrchestrationEvent:
         """Finalize orchestration analysis and emit summary."""
         self.state.phase = OrchestrationPhase.DONE
@@ -361,6 +433,9 @@ class OrchestrationAnalyzer:
                 "total_verifications": self.state.verification_count,
                 "total_elapsed": self.state.elapsed,
                 "routing_model": self.state.routing_model,
+                "budget_alert": self.state.last_budget_alert.to_dict()
+                if self.state.last_budget_alert
+                else None,
             },
         )
 

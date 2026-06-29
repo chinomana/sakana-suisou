@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -271,10 +272,14 @@ class ToolRegistry:
                     str(args.get("cwd", ".")),
                     approved=approved,
                 )
+                summary = self._summarize_tests(result)
                 return {
                     "ok": result["exit_code"] == 0 and not result["timed_out"],
                     **result,
-                    "summary": self._summarize_tests(result),
+                    "summary": summary,
+                    "failures": self._extract_test_failures(result),
+                    "output_truncated": result.get("stdout_truncated", False)
+                    or result.get("stderr_truncated", False),
                 }
             if name == "run_lint":
                 approved = await self.approve_terminal_operation(name, args)
@@ -294,9 +299,40 @@ class ToolRegistry:
             if name == "git_show":
                 return {"ok": True, **self._git().show(revision=str(args.get("revision", "HEAD")))}
         except (KeyError, ValueError, FileToolError, TerminalToolError, GitToolError) as e:
-            return {"ok": False, "error": str(e), "tool": name}
+            return self._tool_error(name, e, args)
 
-        return {"ok": False, "error": f"Unknown tool: {name}", "tool": name}
+        return {
+            "ok": False,
+            "error": f"Unknown tool: {name}",
+            "tool": name,
+            "error_type": "unknown_tool",
+            "retryable": False,
+        }
+
+    def _tool_error(self, name: str, error: Exception, args: dict[str, Any]) -> dict[str, Any]:
+        error_type = type(error).__name__
+        message = str(error)
+        retryable = isinstance(error, TerminalToolError) and any(
+            marker in message.lower() for marker in ("timed out", "timeout", "temporarily")
+        )
+        return {
+            "ok": False,
+            "tool": name,
+            "error": message,
+            "error_type": error_type,
+            "retryable": retryable,
+            "arguments": self._safe_error_arguments(args),
+            "traceback_tail": traceback.format_exception_only(type(error), error)[-1].strip(),
+        }
+
+    def _safe_error_arguments(self, args: dict[str, Any]) -> dict[str, Any]:
+        safe: dict[str, Any] = {}
+        for key, value in args.items():
+            if key in {"content", "new_string", "old_string"}:
+                safe[key] = f"<{len(str(value))} chars>"
+            else:
+                safe[key] = value
+        return safe
 
     def _schema(
         self,
@@ -431,3 +467,34 @@ class ToolRegistry:
         summary["total"] = sum(known_counts) if known_counts else None
         summary["status"] = "passed" if result.get("exit_code") == 0 else "failed"
         return summary
+
+    def _extract_test_failures(self, result: dict[str, Any], limit: int = 5) -> list[dict[str, str]]:
+        output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+        failures: list[dict[str, str]] = []
+        current: dict[str, str] | None = None
+        for line in output.splitlines():
+            failed_match = re.match(r"_{2,}\s+(.+?)\s+_{2,}$", line.strip())
+            short_match = re.match(r"FAILED\s+([^\s]+)\s+-\s+(.+)", line.strip())
+            if failed_match:
+                current = {"test": failed_match.group(1), "error": "", "snippet": ""}
+                failures.append(current)
+                if len(failures) >= limit:
+                    break
+                continue
+            if short_match:
+                failures.append(
+                    {
+                        "test": short_match.group(1),
+                        "error": short_match.group(2),
+                        "snippet": line.strip(),
+                    }
+                )
+                if len(failures) >= limit:
+                    break
+                continue
+            if current is not None and ("AssertionError" in line or line.startswith("E   ")):
+                current["error"] = (current.get("error", "") + " " + line.strip()).strip()
+            if current is not None and line.startswith((">", "E   ")):
+                current["snippet"] = (current.get("snippet", "") + "\n" + line).strip()
+        return failures[:limit]
+

@@ -44,6 +44,7 @@ class ModelConfig(BaseSettings):
 
     default: str = "fugu-ultra"  # fugu | fugu-ultra
     reasoning_effort: Literal["high", "xhigh", "max"] = "xhigh"
+    adaptive_effort: bool = True
     max_output_tokens: int = 32768
     truncation: Literal["auto", "disabled"] = "auto"
 
@@ -66,6 +67,10 @@ class OrchestrationConfig(BaseSettings):
     heartbeat_interval: int = 30  # seconds
     initial_routing_threshold: float = 5.0  # seconds to infer routing
     worker_pattern_window: int = 10  # tokens to analyze patterns
+    token_budget: int = 1_000_000
+    token_budget_warning_ratio: float = 0.8
+    max_orchestration_ratio: float = 0.5
+    cost_per_million_tokens: float = 0.0
 
 
 class VoiceConfig(BaseSettings):
@@ -104,6 +109,7 @@ class PromptConfig(BaseSettings):
 
     unlimited_mode: bool = False  # Override base_instructions restrictions
     custom_instructions: str | None = None
+    use_instruction_templates: bool = True
     preserve_full_history: bool = True  # Send full history (no previous_response_id)
 
 

@@ -130,8 +130,35 @@ class StreamParser:
                 output_item=self._content_output_item(event),
             )
 
-        if event_type == "response.reasoning_summary_text.delta":
+        if event_type in (
+            "response.reasoning_summary_text.delta",
+            "response.reasoning.delta",
+            "response.reasoning_text.delta",
+        ):
             return StreamChunk(type="reasoning", content=event.get("delta", ""))
+
+        if event_type in ("response.usage.delta", "response.usage.done"):
+            usage = event.get("usage") or event.get("delta") or {}
+            chunk = StreamChunk(type="token_usage", token_usage=self._usage_from_responses(usage))
+            details = usage.get("details", {}) if isinstance(usage, dict) else {}
+            if details:
+                chunk.routing_confidence = details.get("routing_confidence")
+            return chunk
+
+        if event_type.startswith("response.orchestration"):
+            return StreamChunk(
+                type="routing_signal",
+                content=str(event.get("message") or event.get("delta") or ""),
+                routing_confidence=event.get("routing_confidence"),
+                worker_id=event.get("worker_id"),
+            )
+
+        if event_type.startswith("response.worker"):
+            return StreamChunk(
+                type="worker_signal",
+                content=str(event.get("message") or event.get("delta") or ""),
+                worker_id=event.get("worker_id"),
+            )
 
         if event_type == "response.output_item.added":
             item = event.get("item", {})
@@ -353,9 +380,21 @@ class StreamParser:
         )
 
     def _usage_from_responses(self, usage: dict[str, Any]) -> TokenUsage:
+        details = usage.get("details", {}) if isinstance(usage, dict) else {}
+        output_details = usage.get("output_tokens_details", {}) if isinstance(usage, dict) else {}
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+        orchestration_tokens = usage.get(
+            "orchestration_tokens",
+            details.get(
+                "orchestration_tokens",
+                output_details.get("orchestration_tokens", 0),
+            ),
+        )
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens + orchestration_tokens)
         return TokenUsage(
-            input_tokens=usage.get("input_tokens", usage.get("prompt_tokens", 0)),
-            output_tokens=usage.get("output_tokens", usage.get("completion_tokens", 0)),
-            orchestration_tokens=usage.get("orchestration_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            orchestration_tokens=orchestration_tokens,
+            total_tokens=total_tokens,
         )

@@ -24,8 +24,10 @@ from fugu_vibe.api.client import FuguClient
 from fugu_vibe.context import ContextManager
 from fugu_vibe.core.attachments import build_content_parts
 from fugu_vibe.core.checkpoints import CheckpointError, CheckpointManager
+from fugu_vibe.core.effort import select_effort
 from fugu_vibe.core.event_bus import EventBus
 from fugu_vibe.core.event_log import EventLogWriter
+from fugu_vibe.core.instructions import build_instructions
 from fugu_vibe.core.orchestration import OrchestrationAnalyzer
 from fugu_vibe.core.patch_capture import capture_unified_diff
 from fugu_vibe.core.session_output import SessionOutputWriter
@@ -299,11 +301,25 @@ async def _send_to_fugu(
 
     # Initialize orchestration analyzer
     analyzer = OrchestrationAnalyzer(config, event_bus)
+    effort_decision = select_effort(
+        prompt,
+        config.model.reasoning_effort,  # type: ignore[arg-type]
+        adaptive=config.model.adaptive_effort,
+        attachment_count=len(files),
+    )
+    instructions = (
+        build_instructions(CODING_AGENT_INSTRUCTIONS, Path.cwd())
+        if config.prompt.use_instruction_templates
+        else CODING_AGENT_INSTRUCTIONS
+    )
 
     console.print(f"\n[dim]> {prompt[:80]}{'...' if len(prompt) > 80 else ''}[/dim]")
     if files:
         names = ", ".join(path.name for path in files)
         console.print(f"[dim]Attachments: {names}[/dim]")
+    console.print(
+        f"[dim]Effort: {effort_decision.effort} ({effort_decision.reason})[/dim]"
+    )
     console.print("[dim]Thinking...[/dim]", end="")
     output_writer.start_turn(prompt, files)
     response_parts: list[str] = []
@@ -323,9 +339,9 @@ async def _send_to_fugu(
         result = await agent_loop.run(
             messages=messages,
             model=config.model.default,
-            effort=config.model.reasoning_effort,  # type: ignore
+            effort=effort_decision.effort,
             web_search=web_search,
-            instructions=CODING_AGENT_INSTRUCTIONS,
+            instructions=instructions,
             max_output_tokens=min(config.model.max_output_tokens, 4096),
             on_content=on_content,
             on_tool_call=on_tool_call,
