@@ -11,9 +11,15 @@ Sakana Fugu スタイルの API をターミナルから使用するための Py
 このプロジェクトは初期段階です。安定したパスは通常のテキストベース `vibe` セッションです。
 
 - テキスト入力：使用可能。
+- PDF/画像/ファイル添付：`vibe` 内で `--file` または `/attach` を介して使用可能。
 - ワークスペース選択：`-C/--workspace` を介して使用可能。
+- セッション出力：選択したワークスペースの `.fugu-vibe/sessions/` に保存。
+- 非同期タスク状態/出力：選択したワークスペースの `.fugu-vibe/tasks/` に保存。
+- 実行時ワークスペース成果物（`.fugu-vibe/` および `.fugu-worktrees/`）は git によって無視される。
 - オーケストレーションダッシュボード：`--viz` によるオプション；デフォルトは無効。フルスクリーン描画がターミナル入力を妨げる可能性があるため。
 - ボイスモード：現在はプレースホルダーのみ。レコーダー/STT の足場は存在するが、プッシュトゥトーク/バックグラウンドボイスインタラクションはまだ完全には実装されていない。
+
+本 CLI はプロンプトとファイルコンテキストを Fugu に送信し、出力を記録する。現在、モデルが生成したパッチをソースツリーに自動適用することはない。
 
 ## インストール
 
@@ -68,6 +74,15 @@ fugu-vibe vibe
 セッション内：
 
 - プロンプトを入力して Enter を押す。
+- `/context` で現在のプロンプトコンテキストを確認。
+- `/compact` で古い会話のターンをローカル要約に圧縮。
+- `/ls [glob]`、`/read <path>`、および `/search <query> [glob]` でワークスペースファイルを安全に確認。
+- `/diff` で現在の git 差分を確認。
+- `/apply <patch-file>` で設定されたパッチポリシー下で統一差分を検査して適用。
+- `/tools` でローカルツールポリシーを確認。
+- `/terminal <command>` で、ターミナルツールが明示的に有効な場合のみ、ワークスペースターミナルコマンドを実行。
+- `/attach <path>` で PDF/画像/ファイルコンテキストを追加。
+- `/files` および `/clear-files` で添付ファイルを確認またはクリア。
 - `/status` でタスク状態を表示。
 - `/tasks` でアクティブなタスクを一覧表示。
 - `/help` でセッションコマンドを表示。
@@ -78,8 +93,55 @@ fugu-vibe vibe
 ```bash
 fugu-vibe vibe --model fugu-ultra --effort xhigh
 fugu-vibe vibe --web-search
+fugu-vibe vibe --file spec.pdf --file screenshot.png
 fugu-vibe vibe --unlimited
 ```
+
+セッション中にファイルを添付：
+
+```text
+/attach spec.pdf
+/attach screenshot.png notes.txt
+/files
+/clear-files
+```
+
+添付ファイルはクリアされるまで、プロンプト送信時に毎回付随される。画像は画像入力として送信；PDF およびその他のファイルはファイル入力として送信。小さなテキスト/コードファイルはテキストコンテキストとしてインライン化される。25 MB を超える添付ファイルは送信前に拒否される。
+
+セッション記録は以下に書き込まれる：
+
+```text
+.fugu-vibe/sessions/<timestamp>.md
+```
+
+現在のコンテキストメタデータは以下に書き込まれる：
+
+```text
+.fugu-vibe/context/current.json
+```
+
+ワークスペースファイル検査コマンドは読み取り専用で、選択したワークスペースに制限される。`.git/`、`.fugu-vibe/`、`.venv/`、および `node_modules/` などの実行時/キャッシュディレクトリをスキップする。
+
+インタラクティブセッションは読み取り専用ファイルツール（`file.list`、`file.read`、`file.search`）用の Fugu 関数呼び出しを実行できる。ターミナル実行は自動モデル呼び出しには公開されない。
+
+ターミナル実行はデフォルトで無効。`vibe` で手動ターミナル実行を有効にするには、以下を設定：
+
+```toml
+[tools]
+terminal_enabled = true
+terminal_approval = "ask"
+```
+
+次に使用：
+
+```text
+/tools
+/terminal git status
+```
+
+ターミナルツールはワークスペースに制限され、一般的な破壊的コマンドパターンをブロックし、タイムアウトを適用し、表示された出力を切り捨て、完全なログを `.fugu-vibe/tool-runs/` に保存する。Fugu はまだターミナルツールを自動的に呼び出さない。
+
+パッチ適用のデフォルトポリシーは `ask-apply`。`/apply <patch-file>` はパッチパスを検証し、`git apply --check` を実行し、差分を表示し、適用前に `yes` を求める。`[patch] mode = "propose-only"` を設定して、CLI からパッチ適用を無効にする。
 
 必要な場合のみダッシュボードを有効化：
 
@@ -107,7 +169,7 @@ fugu-vibe -C /path/to/project dashboard
 fugu-vibe -C /path/to/project vibe
 ```
 
-これはプロジェクト設定の読み込みと git/worktree 処理の初期化の前に、プロセスの作業ディレクトリを変更します。`vibe`、`submit`、`config` などのコマンドに影響します。
+これはプロジェクト設定の読み込みと git/worktree 処理の初期化の前に、プロセスの作業ディレクトリを変更する。`vibe`、`submit`、`config` などのコマンドに影響する。
 
 環境変数で設定することも可能：
 
@@ -122,6 +184,12 @@ fugu-vibe vibe
 
 ```bash
 fugu-vibe submit "認証のリファクタリング" -p "認証モジュールをリファクタリングする"
+```
+
+ファイルをコンテキストとして含める：
+
+```bash
+fugu-vibe submit "仕様をレビュー" -p "この仕様を要約" -f spec.pdf --wait
 ```
 
 完了を待つ：
@@ -150,6 +218,10 @@ fugu-vibe status --watch
 fugu-vibe attach <task-id>
 fugu-vibe cancel <task-id>
 ```
+
+タスク記録は `.fugu-vibe/tasks/` に保存される。タスクは Fugu 出力とメタデータを記録するが、まだコード変更をワークスペースに自動適用しない。
+
+`submit` は現在、キュー/実行中のタスクが実行される間、送信プロセスを生存させ続ける。同じターミナルで最終結果を出力したい場合は `--wait` を使用。
 
 ## 設定
 
@@ -207,6 +279,14 @@ fugu-vibe voice --continuous
 ```
 
 ## 開発
+
+デフォルトの CLI 出力は静かに保たれる。デバッグログを表示するには、サブコマンドの前に `--verbose` を使用：
+
+```bash
+fugu-vibe --verbose vibe
+```
+
+ローカルターミナルツールはデフォルトで無効。パッチ適用ポリシーはデフォルトで `ask-apply`；将来のパッチツールはファイルを変更する前に差分を表示して確認すべき。
 
 ```bash
 uv venv .venv --python 3.12

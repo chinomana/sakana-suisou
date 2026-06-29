@@ -11,9 +11,15 @@
 本项目处于早期阶段。稳定路径是正常的文本 `vibe` 会话。
 
 - 文本输入：可用。
+- PDF/图片/文件附件：在 `vibe` 中通过 `--file` 或 `/attach` 可用。
 - 工作区选择：通过 `-C/--workspace` 可用。
+- 会话输出：保存至所选工作区的 `.fugu-vibe/sessions/` 下。
+- 异步任务状态/输出：保存至所选工作区的 `.fugu-vibe/tasks/` 下。
+- 运行时工作区产物（`.fugu-vibe/` 和 `.fugu-worktrees/`）被 git 忽略。
 - 编排仪表盘：通过 `--viz` 可选；默认关闭，因为全屏渲染可能干扰终端输入。
 - 语音模式：仅为占位。录音器/STT 骨架存在，但按键通话/后台语音交互尚未完全实现。
+
+本 CLI 将提示词和文件上下文发送给 Fugu，并记录输出。目前尚未自动将模型生成的补丁应用到源代码树。
 
 ## 安装
 
@@ -68,6 +74,15 @@ fugu-vibe vibe
 会话内操作：
 
 - 输入提示词并按回车。
+- 使用 `/context` 查看当前提示词上下文。
+- 使用 `/compact` 将较早的对话轮次压缩为本地摘要。
+- 使用 `/ls [glob]`、`/read <path>` 和 `/search <query> [glob]` 安全地检查工作区文件。
+- 使用 `/diff` 查看当前 git 差异。
+- 使用 `/apply <patch-file>` 在配置的补丁策略下检查并应用统一差异。
+- 使用 `/tools` 查看本地工具策略。
+- 使用 `/terminal <command>` 仅在终端工具被显式启用时运行工作区终端命令。
+- 使用 `/attach <path>` 添加 PDF/图片/文件上下文。
+- 使用 `/files` 和 `/clear-files` 查看或清除已附加的文件。
 - 使用 `/status` 显示任务状态。
 - 使用 `/tasks` 列出活动任务。
 - 使用 `/help` 显示会话命令。
@@ -78,8 +93,55 @@ fugu-vibe vibe
 ```bash
 fugu-vibe vibe --model fugu-ultra --effort xhigh
 fugu-vibe vibe --web-search
+fugu-vibe vibe --file spec.pdf --file screenshot.png
 fugu-vibe vibe --unlimited
 ```
+
+在会话中附加文件：
+
+```text
+/attach spec.pdf
+/attach screenshot.png notes.txt
+/files
+/clear-files
+```
+
+附件会在每次发送提示词时附带，直到你清除。图片作为图片输入发送；PDF 和其他文件作为文件输入发送。小型文本/代码文件以内联文本上下文形式发送。大于 25 MB 的附件会在发送前被拒绝。
+
+会话记录写入：
+
+```text
+.fugu-vibe/sessions/<timestamp>.md
+```
+
+当前上下文元数据写入：
+
+```text
+.fugu-vibe/context/current.json
+```
+
+工作区文件检查命令是只读的，并限制在所选工作区范围内。它们跳过运行时/缓存目录，如 `.git/`、`.fugu-vibe/`、`.venv/` 和 `node_modules/`。
+
+交互式会话可以执行 Fugu 函数调用，用于只读文件工具（`file.list`、`file.read`、`file.search`）。终端执行不会暴露给自动模型调用。
+
+终端执行默认关闭。要在 `vibe` 中启用手动终端运行，请设置：
+
+```toml
+[tools]
+terminal_enabled = true
+terminal_approval = "ask"
+```
+
+然后使用：
+
+```text
+/tools
+/terminal git status
+```
+
+终端工具被限制在工作区内，会阻止常见的破坏性命令模式，应用超时，截断显示的输出，并将完整日志保存在 `.fugu-vibe/tool-runs/` 下。Fugu 目前还不会自动调用终端工具。
+
+补丁应用默认策略为 `ask-apply`。`/apply <patch-file>` 会验证补丁路径，运行 `git apply --check`，显示差异，并在应用前要求输入 `yes`。设置 `[patch] mode = "propose-only"` 以从 CLI 禁用应用补丁。
 
 仅在需要时启用仪表盘：
 
@@ -124,6 +186,12 @@ fugu-vibe vibe
 fugu-vibe submit "重构认证" -p "重构认证模块"
 ```
 
+将文件作为上下文包含：
+
+```bash
+fugu-vibe submit "审查规范" -p "总结这份规范" -f spec.pdf --wait
+```
+
 等待完成：
 
 ```bash
@@ -150,6 +218,10 @@ fugu-vibe status --watch
 fugu-vibe attach <task-id>
 fugu-vibe cancel <task-id>
 ```
+
+任务记录存储在 `.fugu-vibe/tasks/` 中。任务记录 Fugu 输出和元数据，但尚未自动将代码更改应用到工作区。
+
+`submit` 目前在排队/运行中的任务执行期间保持提交进程存活。当你想在同一终端打印最终结果时，请使用 `--wait`。
 
 ## 配置
 
@@ -207,6 +279,14 @@ fugu-vibe voice --continuous
 ```
 
 ## 开发
+
+默认 CLI 输出保持安静。使用 `--verbose` 在子命令之前显示调试日志：
+
+```bash
+fugu-vibe --verbose vibe
+```
+
+本地终端工具默认关闭。补丁应用策略默认为 `ask-apply`；未来的补丁工具应在修改文件前显示差异并询问。
 
 ```bash
 uv venv .venv --python 3.12

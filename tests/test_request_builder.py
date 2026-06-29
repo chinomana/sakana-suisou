@@ -43,6 +43,7 @@ class TestFuguRequestBuilder:
         )
         
         assert "tools" in body
+        assert body["tools"] == [{"type": "web_search"}]
         assert body["tool_choice"] == "auto"
 
     def test_unlimited_mode(self):

@@ -31,7 +31,7 @@ class FuguRequestBuilder:
     # Built-in tools available
     BUILTIN_TOOLS = {
         "web_search": {
-            "type": "web_search_preview",
+            "type": "web_search",
         }
     }
 
