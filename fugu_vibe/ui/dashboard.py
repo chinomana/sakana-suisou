@@ -6,6 +6,7 @@ of Fugu's internal multi-agent coordination.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 import structlog
@@ -13,8 +14,6 @@ from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TextColumn
-from rich.table import Table
 from rich.text import Text
 
 from fugu_vibe.core.event_bus import Event, EventBus, EventType
@@ -30,7 +29,7 @@ logger = structlog.get_logger()
 class OrchestrationDashboard:
     """
     Real-time dashboard showing Fugu's internal orchestration.
-    
+
     Layout:
     ┌──────────────────────────────────────────────┐
     │ 🐡 Fugu Ultra - Orchestration Dashboard      │
@@ -52,58 +51,60 @@ class OrchestrationDashboard:
         self.config = config
         self.event_bus = event_bus
         self.console = Console()
-        
+
         # Components
         self.timeline = OrchestrationTimeline()
         self.token_meter = TokenMeter()
         self.task_tree = TaskTree()
-        
+
         # State
         self._orch_state = OrchestrationState()
         self._stream_content: list[str] = []
         self._max_content_lines = 50
+        self._routing_confidence: float | None = None
+        self._last_budget_alert: dict | None = None
         self._running = False
         self._live: Live | None = None
         self._update_task: asyncio.Task | None = None
-        
+
         # Layout configuration
         self.layout = self._create_layout()
 
     def _create_layout(self) -> Layout:
         """Create the dashboard layout."""
         layout = Layout(name="root")
-        
+
         # Header
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="main"),
             Layout(name="footer", size=1),
         )
-        
+
         # Main area: left (orchestration) + right (content)
         layout["main"].split_row(
             Layout(name="left", ratio=1),
             Layout(name="right", ratio=2),
         )
-        
+
         # Left: timeline + tokens
         layout["left"].split_column(
             Layout(name="timeline", ratio=2),
             Layout(name="tokens", ratio=1),
         )
-        
+
         # Right: content + tasks
         layout["right"].split_column(
             Layout(name="content", ratio=3),
             Layout(name="tasks", ratio=1),
         )
-        
+
         return layout
 
     async def start(self) -> None:
         """Start the dashboard display."""
         self._running = True
-        
+
         # Subscribe to events
         self.event_bus.on(EventType.ORCH_ROUTING, self._on_routing)
         self.event_bus.on(EventType.ORCH_WORKER, self._on_worker)
@@ -118,7 +119,7 @@ class OrchestrationDashboard:
         self.event_bus.on(EventType.TASK_CREATED, self._on_task_update)
         self.event_bus.on(EventType.TASK_STARTED, self._on_task_update)
         self.event_bus.on(EventType.TASK_COMPLETED, self._on_task_update)
-        
+
         self._render_layout()
 
         # Start live display
@@ -129,26 +130,24 @@ class OrchestrationDashboard:
             screen=False,
         )
         self._live.start()
-        
+
         # Start update loop
         self._update_task = asyncio.create_task(self._update_loop())
-        
+
         logger.info("dashboard_started")
 
     async def stop(self) -> None:
         """Stop the dashboard display."""
         self._running = False
-        
+
         if self._update_task:
             self._update_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._update_task
-            except asyncio.CancelledError:
-                pass
-        
+
         if self._live:
             self._live.stop()
-        
+
         logger.info("dashboard_stopped")
 
     async def _update_loop(self) -> None:
@@ -166,27 +165,27 @@ class OrchestrationDashboard:
         """Render all dashboard panels."""
         # Header
         self.layout["header"].update(self._render_header())
-        
+
         # Timeline
         self.layout["timeline"].update(
             Panel(self.timeline.render(), title="📊 Orchestration Timeline", border_style="cyan")
         )
-        
+
         # Token meter
         self.layout["tokens"].update(
             Panel(self.token_meter.render(), title="💰 Token Usage", border_style="green")
         )
-        
+
         # Content
         self.layout["content"].update(
             Panel(self._render_content(), title="📝 Output", border_style="blue")
         )
-        
+
         # Tasks
         self.layout["tasks"].update(
             Panel(self.task_tree.render(), title="📋 Tasks", border_style="yellow")
         )
-        
+
         # Footer
         self.layout["footer"].update(self._render_footer())
 
@@ -201,7 +200,7 @@ class OrchestrationDashboard:
             OrchestrationPhase.DONE: "✅",
             OrchestrationPhase.ERROR: "❌",
         }.get(self._orch_state.phase, "❓")
-        
+
         header_text = Text()
         header_text.append("🐡 ", style="bold cyan")
         header_text.append("Fugu Vibe CLI", style="bold white")
@@ -211,7 +210,14 @@ class OrchestrationDashboard:
         header_text.append(f"Workers: {self._orch_state.active_workers}", style="cyan")
         header_text.append("  |  ", style="dim")
         header_text.append(f"Elapsed: {self._orch_state.elapsed:.1f}s", style="green")
-        
+        if self._routing_confidence is not None:
+            header_text.append("  |  ", style="dim")
+            header_text.append(f"Routing: {self._routing_confidence:.0%}", style="magenta")
+        if self._last_budget_alert:
+            header_text.append("  |  ", style="dim")
+            level = str(self._last_budget_alert.get("level", "warning")).upper()
+            header_text.append(f"Budget: {level}", style="red" if level == "CRITICAL" else "yellow")
+
         return Panel(header_text, style="on_dark_blue")
 
     def _render_content(self) -> Text:
@@ -244,7 +250,10 @@ class OrchestrationDashboard:
         self._orch_state.phase = OrchestrationPhase.ROUTING
         self._orch_state.routing_model = event.data.get("model")
         self._orch_state.routing_confidence = event.data.get("confidence")
-        self.timeline.add_event("🧭", f"Routing: {event.data.get('model', 'unknown')}", "cyan")
+        self._routing_confidence = event.data.get("confidence")
+        model = event.data.get("model", "unknown")
+        message = event.data.get("message") or f"Routing: {model}"
+        self.timeline.add_event("🧭", message, "cyan")
 
     def _on_worker(self, event: Event) -> None:
         self._orch_state.phase = OrchestrationPhase.WORKER_ACTIVE
@@ -286,17 +295,22 @@ class OrchestrationDashboard:
         self._stream_content.append(f"[tool:{status}] {name} {summary}".rstrip())
 
     def _on_stream_token_usage(self, event: Event) -> None:
-        self.token_meter.update(
-            input_tokens=event.data.get("input_tokens", 0),
-            output_tokens=event.data.get("output_tokens", 0),
-            orchestration_tokens=event.data.get("orchestration_tokens", 0),
-        )
+        self._update_token_meter(event.data)
 
     def _on_token_update(self, event: Event) -> None:
+        self._update_token_meter(event.data)
+
+    def _update_token_meter(self, data: dict) -> None:
+        budget_alert = data.get("budget_alert") if isinstance(data.get("budget_alert"), dict) else None
+        if budget_alert:
+            self._last_budget_alert = budget_alert
+            self._stream_content.append(f"[budget:{budget_alert.get('level')}] {budget_alert.get('message')}")
         self.token_meter.update(
-            input_tokens=event.data.get("input_tokens", 0),
-            output_tokens=event.data.get("output_tokens", 0),
-            orchestration_tokens=event.data.get("orchestration_tokens", 0),
+            input_tokens=data.get("input_tokens", self.token_meter.input_tokens),
+            output_tokens=data.get("output_tokens", self.token_meter.output_tokens),
+            orchestration_tokens=data.get("orchestration_tokens", self.token_meter.orchestration_tokens),
+            estimated_cost_usd=data.get("estimated_cost_usd") or (budget_alert or {}).get("estimated_cost_usd"),
+            budget_alert=budget_alert,
         )
 
     def _on_task_update(self, event: Event) -> None:

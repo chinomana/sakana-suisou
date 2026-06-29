@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -45,6 +44,7 @@ class ModelConfig(BaseSettings):
 
     default: str = "fugu-ultra"  # fugu | fugu-ultra
     reasoning_effort: Literal["high", "xhigh", "max"] = "xhigh"
+    adaptive_effort: bool = True
     max_output_tokens: int = 32768
     truncation: Literal["auto", "disabled"] = "auto"
 
@@ -67,6 +67,10 @@ class OrchestrationConfig(BaseSettings):
     heartbeat_interval: int = 30  # seconds
     initial_routing_threshold: float = 5.0  # seconds to infer routing
     worker_pattern_window: int = 10  # tokens to analyze patterns
+    token_budget: int = 1_000_000
+    token_budget_warning_ratio: float = 0.8
+    max_orchestration_ratio: float = 0.5
+    cost_per_million_tokens: float = 0.0
 
 
 class VoiceConfig(BaseSettings):
@@ -105,6 +109,7 @@ class PromptConfig(BaseSettings):
 
     unlimited_mode: bool = False  # Override base_instructions restrictions
     custom_instructions: str | None = None
+    use_instruction_templates: bool = True
     preserve_full_history: bool = True  # Send full history (no previous_response_id)
 
 
@@ -113,10 +118,29 @@ class ToolConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_TOOLS_")
 
-    terminal_enabled: bool = False
-    terminal_approval: Literal["off", "ask", "auto-safe"] = "off"
+    terminal_enabled: bool = True
+    terminal_approval: Literal["off", "ask", "auto-safe"] = "auto-safe"
     terminal_timeout_seconds: int = 120
     max_output_chars: int = 20_000
+
+
+class MCPConfig(BaseSettings):
+    """Model Context Protocol integration settings."""
+
+    model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_MCP_")
+
+    enabled: bool = True
+    timeout_seconds: float = 30.0
+
+
+class SafetyConfig(BaseSettings):
+    """Safety governance and rollback settings."""
+
+    model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_SAFETY_")
+
+    mode: Literal["ask", "auto-safe", "auto-edit", "auto"] = "auto-safe"
+    checkpoint_enabled: bool = True
+    checkpoint_each_turn: bool = False
 
 
 class PatchConfig(BaseSettings):
@@ -142,6 +166,8 @@ class Config(BaseSettings):
     tasks: TaskConfig = Field(default_factory=TaskConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
+    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     patch: PatchConfig = Field(default_factory=PatchConfig)
 
     @classmethod

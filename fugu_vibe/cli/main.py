@@ -8,6 +8,8 @@ Commands:
     attach    Attach to a running task
     cancel    Cancel a task
     dashboard View a running workspace dashboard
+    run       Run one prompt headlessly
+    mcp       Manage MCP servers
     voice     Voice-controlled task submission
     config    Manage configuration
     models    List available models
@@ -16,29 +18,28 @@ Commands:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from pathlib import Path
 
 import click
 from rich.console import Console
-from rich.panel import Panel
 from rich.text import Text
 
-from fugu_vibe.config import Config, load_config_with_source
-from fugu_vibe.utils.logging import setup_logging
-
-from fugu_vibe.cli.commands.vibe import vibe_command
-from fugu_vibe.cli.commands.submit import submit_command
-from fugu_vibe.cli.commands.status import status_command
 from fugu_vibe.cli.commands.attach import attach_command
-from fugu_vibe.cli.commands.cancel import cancel_command
-from fugu_vibe.cli.commands.dashboard import dashboard_command
-from fugu_vibe.cli.commands.voice import voice_command
-from fugu_vibe.cli.commands.config import config_command
-from fugu_vibe.cli.commands.models import models_command
 from fugu_vibe.cli.commands.auth import auth_command
+from fugu_vibe.cli.commands.cancel import cancel_command
+from fugu_vibe.cli.commands.config import config_command
+from fugu_vibe.cli.commands.dashboard import dashboard_command
+from fugu_vibe.cli.commands.mcp import mcp_command
+from fugu_vibe.cli.commands.models import models_command
+from fugu_vibe.cli.commands.run import run_command
+from fugu_vibe.cli.commands.status import status_command
+from fugu_vibe.cli.commands.submit import submit_command
+from fugu_vibe.cli.commands.vibe import vibe_command
+from fugu_vibe.cli.commands.voice import voice_command
+from fugu_vibe.config import load_config_with_source
+from fugu_vibe.utils.logging import setup_logging
 
 console = Console()
 
@@ -77,18 +78,19 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         effort: str | None, verbose: bool) -> None:
     """
     🐡 Fugu Vibe CLI — Specialized vibe coding for Sakana Fugu.
-    
+
     Features:
     • Async task execution with git-worktree isolation
     • Real-time orchestration visualization
     • Voice-controlled task submission
     • Unlimited prompt mode
     • Full Responses API support with all Fugu-specific parameters
-    
+
     Get started:
         fugu-vibe auth login                    # Set up API key
         fugu-vibe vibe                          # Start interactive session
         fugu-vibe submit "Refactor auth" -p "..."  # Submit task
+        fugu-vibe run --script task.md --json       # Headless CI/SDK mode
     """
     setup_logging(verbose)
 
@@ -106,7 +108,7 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         override_path=resolved_config_path
     )
     config = loaded_config.config
-    
+
     # Override with CLI options
     if api_key:
         config.api.api_key = api_key
@@ -116,14 +118,14 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         config.model.default = model
     if effort:
         config.model.reasoning_effort = effort  # type: ignore
-    
+
     # Store in context
     ctx.ensure_object(dict)
     ctx.obj["config"] = config
     ctx.obj["config_path"] = loaded_config.path
     ctx.obj["verbose"] = verbose
     ctx.obj["workspace"] = Path.cwd()
-    
+
     # Print banner for top-level invocation
     if ctx.invoked_subcommand is None:
         print_banner()
@@ -152,6 +154,8 @@ cli.add_command(status_command, name="status")
 cli.add_command(attach_command, name="attach")
 cli.add_command(cancel_command, name="cancel")
 cli.add_command(dashboard_command, name="dashboard")
+cli.add_command(run_command, name="run")
+cli.add_command(mcp_command, name="mcp")
 cli.add_command(voice_command, name="voice")
 cli.add_command(config_command, name="config")
 cli.add_command(models_command, name="models")

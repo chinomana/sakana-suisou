@@ -1,5 +1,5 @@
 """
-Orchestration inference engine: reverse-engineers Fugu's internal 
+Orchestration inference engine: reverse-engineers Fugu's internal
 multi-agent coordination from streaming response patterns.
 
 Since Sakana Fugu's API does not expose internal routing decisions,
@@ -12,7 +12,6 @@ we use multi-signal temporal analysis to infer:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -23,6 +22,7 @@ import structlog
 
 from fugu_vibe.api.stream_parser import StreamChunk, TokenUsage
 from fugu_vibe.core.event_bus import EventBus, EventType
+from fugu_vibe.core.token_budget import TokenBudget, TokenBudgetAlert
 
 if TYPE_CHECKING:
     from fugu_vibe.config import Config
@@ -71,11 +71,12 @@ class OrchestrationState:
     current_worker: WorkerInfo | None = None
     verification_count: int = 0
     token_usage: TokenUsage = field(default_factory=TokenUsage)
-    
+    last_budget_alert: TokenBudgetAlert | None = None
+
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self.start_time
-    
+
     @property
     def active_workers(self) -> int:
         return sum(1 for w in self.workers if w.end_time is None)
@@ -98,13 +99,13 @@ class OrchestrationEvent:
 class OrchestrationAnalyzer:
     """
     Analyzes Fugu streaming patterns to infer internal orchestration.
-    
+
     Strategy: Since Fugu doesn't expose internal routing, we use
     temporal pattern analysis:
-    
+
     1. Initial delay > threshold → routing decision phase
     2. Token burst patterns → worker activation
-    3. Content section markers → parallel worker boundaries  
+    3. Content section markers → parallel worker boundaries
     4. Quality phrases → verification phase
     5. Token cost ratios → orchestration overhead estimation
     """
@@ -135,20 +136,32 @@ class OrchestrationAnalyzer:
         self.config = config
         self.event_bus = event_bus
         self.state = OrchestrationState()
-        
+        self.token_budget = self._build_token_budget(config)
+        self._last_alert_level: str | None = None
+
         # Signal buffers
         self._token_buffer: deque[tuple[float, int]] = deque(maxlen=1000)
         self._content_buffer: str = ""
         self._first_token_time: float | None = None
         self._last_token_time: float | None = None
         self._token_rate_window: list[tuple[float, int]] = []
-        
+
         # Detection state
         self._routing_detected = False
         self._worker_count = 0
         self._verification_detected = False
-        
+
         logger.info("orchestration_analyzer_initialized")
+
+    def _build_token_budget(self, config: Config | None) -> TokenBudget | None:
+        if config is None:
+            return None
+        return TokenBudget(
+            max_total_tokens=config.orchestration.token_budget,
+            max_orchestration_ratio=config.orchestration.max_orchestration_ratio,
+            warning_ratio=config.orchestration.token_budget_warning_ratio,
+            cost_per_million_tokens=config.orchestration.cost_per_million_tokens,
+        )
 
     async def analyze_chunk(self, chunk: StreamChunk) -> OrchestrationEvent | None:
         """
@@ -156,7 +169,7 @@ class OrchestrationAnalyzer:
         Returns an event if a phase transition is detected.
         """
         now = time.monotonic()
-        
+
         # Track timing
         if self._first_token_time is None and chunk.type in ("content", "reasoning"):
             self._first_token_time = now
@@ -164,29 +177,35 @@ class OrchestrationAnalyzer:
             initial_delay = chunk.elapsed_time
             if initial_delay > self.ROUTING_DELAY_THRESHOLD and not self._routing_detected:
                 return await self._detect_routing(chunk, initial_delay)
-        
+
+        if chunk.type == "routing_signal":
+            return await self._handle_routing_signal(chunk)
+        if chunk.type == "worker_signal":
+            return await self._handle_worker_signal(now, chunk)
+
         # Track token usage
         if chunk.type == "token_usage" and chunk.token_usage:
             self.state.token_usage.update(chunk.token_usage)
             if chunk.routing_confidence:
                 self.state.routing_confidence = chunk.routing_confidence
             await self._emit_token_update()
-        
+            await self._check_token_budget()
+
         # Content analysis
         if chunk.type == "content":
             self._token_buffer.append((now, len(chunk.content)))
             self._content_buffer += chunk.content
-            
+
             # Check for worker burst patterns
-            event = self._detect_worker_patterns(now, chunk)
+            event = await self._detect_worker_patterns(now, chunk)
             if event:
                 return event
-            
+
             # Check for verification markers
-            event = self._detect_verification(chunk)
+            event = await self._detect_verification(chunk)
             if event:
                 return event
-        
+
         self._last_token_time = now
         return None
 
@@ -194,15 +213,15 @@ class OrchestrationAnalyzer:
         """Detect routing decision phase from initial delay."""
         self._routing_detected = True
         self.state.phase = OrchestrationPhase.ROUTING
-        
+
         # Infer routing model from confidence if available
         confidence = chunk.routing_confidence or min(delay / 30.0, 0.95)
         self.state.routing_confidence = confidence
-        
+
         # Infer model from delay profile
         inferred_model = self._infer_model_from_delay(delay)
         self.state.routing_model = inferred_model
-        
+
         event = OrchestrationEvent(
             phase=OrchestrationPhase.ROUTING,
             timestamp=time.monotonic(),
@@ -211,7 +230,41 @@ class OrchestrationAnalyzer:
             confidence=confidence,
             details={"delay_seconds": delay, "inferred": True},
         )
-        
+
+        await self._emit_event(event)
+        return event
+
+    async def _handle_routing_signal(self, chunk: StreamChunk) -> OrchestrationEvent:
+        """Use explicit Fugu routing stream metadata when present."""
+        self._routing_detected = True
+        self.state.phase = OrchestrationPhase.ROUTING
+        self.state.routing_confidence = chunk.routing_confidence
+        event = OrchestrationEvent(
+            phase=OrchestrationPhase.ROUTING,
+            timestamp=time.monotonic(),
+            message=chunk.content or "Fugu routing",
+            confidence=chunk.routing_confidence,
+            details={"explicit_signal": True},
+        )
+        await self._emit_event(event)
+        return event
+
+    async def _handle_worker_signal(self, now: float, chunk: StreamChunk) -> OrchestrationEvent:
+        """Use explicit Fugu worker stream metadata when present."""
+        self.state.phase = OrchestrationPhase.WORKER_ACTIVE
+        worker_id = chunk.worker_id or f"W{self._worker_count + 1}"
+        worker = WorkerInfo(worker_id=worker_id, inferred_model=self.state.routing_model or "unknown")
+        self._worker_count += 1
+        self.state.workers.append(worker)
+        self.state.current_worker = worker
+        event = OrchestrationEvent(
+            phase=OrchestrationPhase.WORKER_ACTIVE,
+            timestamp=now,
+            message=chunk.content or f"Worker {worker_id} active",
+            worker_id=worker_id,
+            model=worker.inferred_model,
+            details={"explicit_signal": True},
+        )
         await self._emit_event(event)
         return event
 
@@ -220,27 +273,27 @@ class OrchestrationAnalyzer:
         # Calculate rolling token rate
         window_start = now - self.WORKER_BURST_WINDOW
         recent_tokens = [
-            size for ts, size in self._token_buffer 
+            size for ts, size in self._token_buffer
             if ts >= window_start
         ]
-        
+
         if len(recent_tokens) < 3:
             return None
-            
+
         rate = sum(recent_tokens) / self.WORKER_BURST_WINDOW
-        
+
         # High rate suggests active worker
         if rate > self.WORKER_BURST_MIN_TOKENS and self.state.phase != OrchestrationPhase.WORKER_ACTIVE:
             self._worker_count += 1
             self.state.phase = OrchestrationPhase.WORKER_ACTIVE
-            
+
             worker = WorkerInfo(
                 worker_id=f"W{self._worker_count}",
                 inferred_model=self.state.routing_model or "unknown",
             )
             self.state.workers.append(worker)
             self.state.current_worker = worker
-            
+
             event = OrchestrationEvent(
                 phase=OrchestrationPhase.WORKER_ACTIVE,
                 timestamp=now,
@@ -249,48 +302,48 @@ class OrchestrationAnalyzer:
                 model=worker.inferred_model,
                 details={"token_rate": rate, "inferred": True},
             )
-            
+
             await self._emit_event(event)
             return event
-        
+
         # Rate drop suggests worker transition
         if rate < 10 and self.state.phase == OrchestrationPhase.WORKER_ACTIVE:
             if self.state.current_worker:
                 self.state.current_worker.end_time = now
             self.state.phase = OrchestrationPhase.SYNTHESIZING
-            
+
             event = OrchestrationEvent(
                 phase=OrchestrationPhase.SYNTHESIZING,
                 timestamp=now,
                 message="Synthesizing worker outputs",
                 details={"workers_completed": self._worker_count, "inferred": True},
             )
-            
+
             await self._emit_event(event)
             return event
-        
+
         return None
 
     async def _detect_verification(self, chunk: StreamChunk) -> OrchestrationEvent | None:
         """Detect verification phase from content markers."""
         lower_content = chunk.content.lower()
-        
+
         for keyword in self.VERIFICATION_KEYWORDS:
             if keyword in lower_content and not self._verification_detected:
                 self._verification_detected = True
                 self.state.phase = OrchestrationPhase.VERIFYING
                 self.state.verification_count += 1
-                
+
                 event = OrchestrationEvent(
                     phase=OrchestrationPhase.VERIFYING,
                     timestamp=time.monotonic(),
                     message=f"Self-verification (#{self.state.verification_count})",
                     details={"trigger": keyword, "inferred": True},
                 )
-                
+
                 await self._emit_event(event)
                 return event
-        
+
         return None
 
     def _infer_model_from_delay(self, delay: float) -> str:
@@ -339,15 +392,40 @@ class OrchestrationAnalyzer:
                 source="orchestration_analyzer",
             )
 
+    async def _check_token_budget(self) -> None:
+        """Emit a budget alert when token usage crosses configured thresholds."""
+        if self.token_budget is None:
+            return
+        alert = self.token_budget.check(self.state.token_usage)
+        if alert is None:
+            return
+        if alert.level == self._last_alert_level and self.state.last_budget_alert:
+            return
+        self._last_alert_level = alert.level
+        self.state.last_budget_alert = alert
+        if self.event_bus:
+            await self.event_bus.emit(
+                EventType.STREAM_TOKEN_USAGE,
+                data={
+                    "input_tokens": self.state.token_usage.input_tokens,
+                    "output_tokens": self.state.token_usage.output_tokens,
+                    "orchestration_tokens": self.state.token_usage.orchestration_tokens,
+                    "total_tokens": self.state.token_usage.total_tokens,
+                    "budget_alert": alert.to_dict(),
+                    "estimated_cost_usd": alert.estimated_cost_usd,
+                },
+                source="orchestration_analyzer",
+            )
+
     async def finalize(self) -> OrchestrationEvent:
         """Finalize orchestration analysis and emit summary."""
         self.state.phase = OrchestrationPhase.DONE
-        
+
         # Close any open workers
         for worker in self.state.workers:
             if worker.end_time is None:
                 worker.end_time = time.monotonic()
-        
+
         event = OrchestrationEvent(
             phase=OrchestrationPhase.DONE,
             timestamp=time.monotonic(),
@@ -362,8 +440,11 @@ class OrchestrationAnalyzer:
                 "total_verifications": self.state.verification_count,
                 "total_elapsed": self.state.elapsed,
                 "routing_model": self.state.routing_model,
+                "budget_alert": self.state.last_budget_alert.to_dict()
+                if self.state.last_budget_alert
+                else None,
             },
         )
-        
+
         await self._emit_event(event)
         return event

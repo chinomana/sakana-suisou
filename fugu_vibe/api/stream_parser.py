@@ -21,28 +21,37 @@ class TokenUsage:
     orchestration_tokens: int = 0
     total_tokens: int = 0
 
+    def update(self, other: TokenUsage) -> None:
+        """Merge another token snapshot into this one."""
+        self.input_tokens = other.input_tokens or self.input_tokens
+        self.output_tokens = other.output_tokens or self.output_tokens
+        self.orchestration_tokens = other.orchestration_tokens or self.orchestration_tokens
+        self.total_tokens = other.total_tokens or (
+            self.input_tokens + self.output_tokens + self.orchestration_tokens
+        )
+
 
 @dataclass
 class StreamChunk:
     """Parsed chunk from Fugu streaming response."""
 
     # Chunk classification
-    type: str = ""  # content | reasoning | tool_call | token_usage | 
+    type: str = ""  # content | reasoning | tool_call | token_usage |
                     # routing_signal | worker_signal | done | error | heartbeat
-    
+
     # Content
     content: str = ""
     tool_call: dict = field(default_factory=dict)
     output_item: dict = field(default_factory=dict)
-    
+
     # Token tracking
     token_usage: TokenUsage = field(default_factory=TokenUsage)
-    
+
     # Orchestration inference (populated by OrchestrationAnalyzer)
     routing_confidence: float | None = None
     worker_id: str | None = None
     is_verification: bool = False
-    
+
     # Metadata
     model: str = ""
     effort: str = ""
@@ -55,7 +64,7 @@ class StreamChunk:
 class StreamParser:
     """
     Parses Server-Sent Events (SSE) from Fugu API streaming responses.
-    
+
     Handles:
     - Content chunks (text output)
     - Reasoning chunks (model thinking)
@@ -74,7 +83,7 @@ class StreamParser:
     def parse_sse_chunk(self, data: str) -> StreamChunk | None:
         """
         Parse a single SSE data line into a StreamChunk.
-        
+
         Returns None for heartbeats/keepalives.
         """
         try:
@@ -89,23 +98,23 @@ class StreamParser:
         typed_chunk = self._parse_typed_responses_event(event_type, event)
         if typed_chunk:
             return typed_chunk
-        
+
         # OpenAI Responses API format
         if "output" in event:
             return self._parse_responses_api(event)
-        
-        # Chat Completions format  
+
+        # Chat Completions format
         if "choices" in event:
             return self._parse_chat_completions(event)
-            
+
         # Usage-only event
         if "usage" in event and not event_type:
             return self._parse_usage(event)
-            
+
         # Done event
         if event_type == "done" or data.strip() == "[DONE]":
             return StreamChunk(type="done")
-            
+
         return None
 
     def _parse_typed_responses_event(
@@ -121,8 +130,35 @@ class StreamParser:
                 output_item=self._content_output_item(event),
             )
 
-        if event_type == "response.reasoning_summary_text.delta":
+        if event_type in (
+            "response.reasoning_summary_text.delta",
+            "response.reasoning.delta",
+            "response.reasoning_text.delta",
+        ):
             return StreamChunk(type="reasoning", content=event.get("delta", ""))
+
+        if event_type in ("response.usage.delta", "response.usage.done"):
+            usage = event.get("usage") or event.get("delta") or {}
+            chunk = StreamChunk(type="token_usage", token_usage=self._usage_from_responses(usage))
+            details = usage.get("details", {}) if isinstance(usage, dict) else {}
+            if details:
+                chunk.routing_confidence = details.get("routing_confidence")
+            return chunk
+
+        if event_type.startswith("response.orchestration"):
+            return StreamChunk(
+                type="routing_signal",
+                content=str(event.get("message") or event.get("delta") or ""),
+                routing_confidence=event.get("routing_confidence"),
+                worker_id=event.get("worker_id"),
+            )
+
+        if event_type.startswith("response.worker"):
+            return StreamChunk(
+                type="worker_signal",
+                content=str(event.get("message") or event.get("delta") or ""),
+                worker_id=event.get("worker_id"),
+            )
 
         if event_type == "response.output_item.added":
             item = event.get("item", {})
@@ -221,24 +257,24 @@ class StreamParser:
     def _parse_responses_api(self, event: dict[str, Any]) -> StreamChunk | None:
         """Parse OpenAI Responses API format."""
         chunk = StreamChunk()
-        
+
         # Extract output items
         output = event.get("output", [])
         if isinstance(output, list):
             for item in output:
                 item_type = item.get("type", "")
-                
+
                 if item_type == "message":
                     content = item.get("content", [])
                     for part in content:
                         if part.get("type") == "output_text":
                             chunk.type = "content"
                             chunk.content = part.get("text", "")
-                            
+
                 elif item_type == " reasoning":
                     chunk.type = "reasoning"
                     chunk.content = item.get("summary", [{}])[0].get("text", "")
-                    
+
                 elif item_type == "web_search_call":
                     chunk.type = "tool_call"
                     chunk.tool_call = {
@@ -246,7 +282,7 @@ class StreamParser:
                         "arguments": item,
                     }
                     chunk.output_item = item
-                    
+
                 elif item_type == "function_call":
                     chunk.type = "tool_call"
                     chunk.tool_call = {
@@ -256,23 +292,23 @@ class StreamParser:
                         "id": item.get("id", ""),
                     }
                     chunk.output_item = item
-        
+
         # Extract usage with orchestration tokens
         usage = event.get("usage", {})
         if usage:
             chunk.type = chunk.type or "token_usage"
             chunk.token_usage = self._usage_from_responses(usage)
-            
+
             # Extract routing confidence if available
             details = usage.get("details", {})
             if details:
                 chunk.routing_confidence = details.get("routing_confidence")
-        
+
         # Model info
         chunk.model = event.get("model", "")
         chunk.response_id = event.get("id", "")
         chunk.finish_reason = event.get("status", "")
-        
+
         return chunk if chunk.type else None
 
     def _content_output_item(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -286,7 +322,7 @@ class StreamParser:
     def _parse_chat_completions(self, event: dict[str, Any]) -> StreamChunk | None:
         """Parse Chat Completions streaming format."""
         chunk = StreamChunk()
-        
+
         choices = event.get("choices", [])
         if not choices:
             # Usage-only chunk at end
@@ -302,19 +338,19 @@ class StreamParser:
                 chunk.model = event.get("model", "")
                 return chunk
             return None
-        
+
         delta = choices[0].get("delta", {})
-        
+
         # Content
         if delta.get("content"):
             chunk.type = "content"
             chunk.content = delta["content"]
-            
+
         # Reasoning
         elif delta.get("reasoning"):
             chunk.type = "reasoning"
             chunk.content = delta["reasoning"]
-            
+
         # Tool calls
         elif delta.get("tool_calls"):
             chunk.type = "tool_call"
@@ -324,14 +360,14 @@ class StreamParser:
                 "arguments": tc.get("function", {}).get("arguments", ""),
                 "index": tc.get("index", 0),
             }
-            
+
         # Finish
         elif choices[0].get("finish_reason"):
             chunk.type = "done"
             chunk.finish_reason = choices[0]["finish_reason"]
-            
+
         chunk.model = event.get("model", "")
-        
+
         return chunk if chunk.type else None
 
     def _parse_usage(self, event: dict[str, Any]) -> StreamChunk:
@@ -344,9 +380,21 @@ class StreamParser:
         )
 
     def _usage_from_responses(self, usage: dict[str, Any]) -> TokenUsage:
+        details = usage.get("details", {}) if isinstance(usage, dict) else {}
+        output_details = usage.get("output_tokens_details", {}) if isinstance(usage, dict) else {}
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+        orchestration_tokens = usage.get(
+            "orchestration_tokens",
+            details.get(
+                "orchestration_tokens",
+                output_details.get("orchestration_tokens", 0),
+            ),
+        )
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens + orchestration_tokens)
         return TokenUsage(
-            input_tokens=usage.get("input_tokens", usage.get("prompt_tokens", 0)),
-            output_tokens=usage.get("output_tokens", usage.get("completion_tokens", 0)),
-            orchestration_tokens=usage.get("orchestration_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            orchestration_tokens=orchestration_tokens,
+            total_tokens=total_tokens,
         )
