@@ -85,6 +85,8 @@ def vibe_command(
         fugu-vibe vibe --unlimited              # No prompt restrictions
     """
     config: Config = ctx.obj["config"]
+    config_path: Path | None = ctx.obj.get("config_path")
+    workspace: Path = ctx.obj.get("workspace", Path.cwd())
     
     # Override with CLI options
     if model:
@@ -95,7 +97,7 @@ def vibe_command(
         config.prompt.unlimited_mode = True
     
     # Run async session
-    asyncio.run(_vibe_session(config, web_search, viz, voice, list(files)))
+    asyncio.run(_vibe_session(config, web_search, viz, voice, list(files), workspace, config_path))
 
 
 async def _vibe_session(
@@ -104,6 +106,8 @@ async def _vibe_session(
     viz_enabled: bool,
     voice_enabled: bool,
     initial_files: list[Path],
+    workspace: Path,
+    config_path: Path | None,
 ) -> None:
     """Main vibe session loop."""
     
@@ -158,6 +162,14 @@ async def _vibe_session(
         context.add_attachment(path)
     
     console.print("\n[bold cyan]🐡 Fugu Vibe Session Started[/bold cyan]")
+    console.print(f"[dim]Workspace: {workspace}[/dim]")
+    console.print(f"[dim]Config: {config_path or 'defaults only'}[/dim]")
+    console.print(f"[dim]API base URL: {config.api.base_url}[/dim]")
+    if config_path is None and config.api.base_url == "https://api.sakana.ai/v1":
+        console.print(
+            "[yellow]No .fugu-vibe.toml or user config was found; using the default Sakana API URL.[/yellow] "
+            "[dim]Use -C, --config, --base-url, or FUGU_VIBE_API_BASE_URL to select your proxy.[/dim]"
+        )
     console.print("Type your prompt and press Enter")
     console.print("Commands: /context /compact /ls /read /search /diff /apply /tools /terminal /quit /help")
     console.print("Exit: Ctrl+C or Ctrl+D\n")

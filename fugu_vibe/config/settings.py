@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +13,14 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class LoadedConfig:
+    """Configuration plus the file path it was loaded from."""
+
+    config: Config
+    path: Path | None
 
 
 class APIConfig(BaseSettings):
@@ -167,7 +176,7 @@ def find_config_file() -> Path | None:
     return None
 
 
-def load_config(override_path: Path | None = None) -> Config:
+def load_config_with_source(override_path: Path | None = None) -> LoadedConfig:
     """Load configuration with hierarchy: defaults < file < env < CLI."""
     # Start with defaults
     config = Config()
@@ -183,4 +192,9 @@ def load_config(override_path: Path | None = None) -> Config:
     # Environment variables override (handled by pydantic-settings)
     # CLI flags will override via model_copy in CLI layer
 
-    return config
+    return LoadedConfig(config=config, path=config_path)
+
+
+def load_config(override_path: Path | None = None) -> Config:
+    """Load configuration with hierarchy: defaults < file < env < CLI."""
+    return load_config_with_source(override_path).config

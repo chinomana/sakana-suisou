@@ -26,7 +26,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from fugu_vibe.config import Config, load_config
+from fugu_vibe.config import Config, load_config_with_source
 from fugu_vibe.utils.logging import setup_logging
 
 from fugu_vibe.cli.commands.vibe import vibe_command
@@ -102,9 +102,10 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         os.chdir(workspace)
 
     # Load configuration from the selected workspace unless --config is provided.
-    config = load_config(
+    loaded_config = load_config_with_source(
         override_path=resolved_config_path
     )
+    config = loaded_config.config
     
     # Override with CLI options
     if api_key:
@@ -119,6 +120,7 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
     # Store in context
     ctx.ensure_object(dict)
     ctx.obj["config"] = config
+    ctx.obj["config_path"] = loaded_config.path
     ctx.obj["verbose"] = verbose
     ctx.obj["workspace"] = Path.cwd()
     

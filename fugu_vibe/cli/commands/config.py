@@ -24,9 +24,11 @@ def config_command() -> None:
 
 @config_command.command(name="show")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def config_show(as_json: bool) -> None:
+@click.pass_context
+def config_show(ctx: click.Context, as_json: bool) -> None:
     """Show current configuration."""
-    config = load_config()
+    config = ctx.obj.get("config") if ctx.obj else None
+    config = config or load_config()
     
     if as_json:
         import json
