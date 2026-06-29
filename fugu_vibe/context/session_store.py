@@ -26,9 +26,11 @@ class SessionStore:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = self.session_dir / "history.jsonl"
         self.state_path = self.session_dir / "state.json"
+        is_new_session = not self.history_path.exists() and not self.state_path.exists()
         if not self.history_path.exists():
             self.history_path.touch()
-        self.write_state(status="created")
+        if is_new_session:
+            self.write_state(status="created")
 
     def append(self, event_type: str, payload: dict[str, Any]) -> None:
         """Append one JSONL event."""
@@ -72,6 +74,16 @@ class SessionStore:
                 messages.append(assistant_message)
         return messages
 
+    def read_state(self) -> dict[str, Any]:
+        """Read the latest recoverable session state."""
+        if not self.state_path.exists():
+            return {}
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def iter_records(self) -> list[dict[str, Any]]:
         """Load all JSONL records, ignoring malformed lines."""
         records: list[dict[str, Any]] = []
@@ -102,6 +114,62 @@ class SessionStore:
         tmp_path = self.state_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(self.state_path)
+
+    @classmethod
+    def list_sessions(cls, workspace: Path, limit: int = 20) -> list[dict[str, Any]]:
+        """Return persisted sessions ordered by most recently updated."""
+        workspace = workspace.expanduser().resolve()
+        sessions_root = workspace / ".fugu-vibe" / "sessions"
+        if not sessions_root.exists():
+            return []
+
+        sessions: list[dict[str, Any]] = []
+        for path in sessions_root.iterdir():
+            if not path.is_dir():
+                continue
+            history_path = path / "history.jsonl"
+            state_path = path / "state.json"
+            if not history_path.exists() and not state_path.exists():
+                continue
+            state: dict[str, Any] = {}
+            if state_path.exists():
+                try:
+                    data = json.loads(state_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    data = {}
+                if isinstance(data, dict):
+                    state = data
+            updated_at = str(state.get("updated_at") or datetime.fromtimestamp(path.stat().st_mtime).isoformat())
+            turns = state.get("turns")
+            if not isinstance(turns, int):
+                turns = cls._count_turns(history_path)
+            sessions.append(
+                {
+                    "session_id": path.name,
+                    "status": state.get("status", "unknown"),
+                    "turns": turns,
+                    "attachments": len(state.get("attachments", [])) if isinstance(state.get("attachments"), list) else 0,
+                    "updated_at": updated_at,
+                    "path": str(path),
+                }
+            )
+        return sorted(sessions, key=lambda item: str(item.get("updated_at", "")), reverse=True)[:limit]
+
+    @staticmethod
+    def _count_turns(history_path: Path) -> int:
+        if not history_path.exists():
+            return 0
+        count = 0
+        for line in history_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and record.get("type") == "turn":
+                count += 1
+        return count
 
     def _latest_session_id(self) -> str | None:
         sessions_root = self.workspace / ".fugu-vibe" / "sessions"

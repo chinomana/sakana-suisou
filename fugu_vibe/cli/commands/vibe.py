@@ -397,6 +397,9 @@ async def _handle_command(
     elif command == "/context":
         _print_context(context)
 
+    elif command == "/sessions":
+        _print_sessions(context)
+
     elif command == "/index":
         data = context.rebuild_index()
         console.print(
@@ -465,6 +468,7 @@ async def _handle_command(
         console.print("\n[bold]Commands:[/bold]")
         console.print("  /quit, /q     - Exit session")
         console.print("  /context      - Show current prompt context")
+        console.print("  /sessions     - List persisted sessions")
         console.print("  /compact      - Compact older conversation turns")
         console.print("  /ls [GLOB]    - List workspace files")
         console.print("  /read PATH    - Read a workspace text file")
@@ -519,6 +523,31 @@ def _print_context(context: ContextManager) -> None:
         console.print(table)
     else:
         console.print("  Attachments: none")
+
+
+def _print_sessions(context: ContextManager) -> None:
+    sessions = context.session_store.list_sessions(context.workspace)
+    if not sessions:
+        console.print("[dim]No persisted sessions.[/dim]")
+        return
+    table = Table(show_header=True)
+    table.add_column("Session")
+    table.add_column("Status")
+    table.add_column("Turns")
+    table.add_column("Files")
+    table.add_column("Updated")
+    for session_info in sessions:
+        session_id = str(session_info.get("session_id", ""))
+        if session_id == context.session_store.session_id:
+            session_id = f"* {session_id}"
+        table.add_row(
+            session_id,
+            str(session_info.get("status", "unknown")),
+            str(session_info.get("turns", 0)),
+            str(session_info.get("attachments", 0)),
+            str(session_info.get("updated_at", "")),
+        )
+    console.print(table)
 
 
 def _format_size(size: int | None) -> str:

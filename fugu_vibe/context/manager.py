@@ -10,6 +10,7 @@ from typing import Any
 
 from fugu_vibe.context.index import CodebaseIndex
 from fugu_vibe.context.session_store import SessionStore
+from fugu_vibe.core.attachments import MAX_INLINE_TEXT_BYTES, TEXT_EXTENSIONS
 
 
 @dataclass
@@ -50,6 +51,7 @@ class ContextManager:
         self.index.load_or_build()
         self.session_store = SessionStore(self.workspace, session_id=self.session_id)
         self.session_id = self.session_store.session_id
+        self._restore_state()
         if self.session_store.history_path.stat().st_size > 0 and not self.history:
             self.history = self.session_store.load_messages()
         self.persist()
@@ -95,9 +97,45 @@ class ContextManager:
                     "content": "Codebase overview for routing and context selection:\n" + self.index.overview(),
                 }
             )
+        snippets = self.context_snippets_for(user_message)
+        if snippets:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Selected workspace context for the current request:\n" + snippets,
+                }
+            )
         messages.extend(self.history)
         messages.append(user_message)
         return messages
+
+    def context_snippets_for(
+        self,
+        user_message: dict[str, Any] | str,
+        *,
+        max_files: int = 5,
+        max_chars_per_file: int = 4_000,
+    ) -> str:
+        """Return compact file snippets selected for the current request."""
+        query = self._message_text(user_message)
+        selected = self.select_context_files(query, max_files=max_files)
+        snippets: list[str] = []
+        for entry in selected:
+            relative_path = str(entry.get("path", ""))
+            if not relative_path:
+                continue
+            path = (self.workspace / relative_path).resolve()
+            if not self._can_inline_context_file(path):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(content) > max_chars_per_file:
+                content = content[: max_chars_per_file - 32].rstrip() + "\n... [truncated]"
+            language = str(entry.get("language", "text"))
+            snippets.append(f"File: {relative_path}\n```{language}\n{content}\n```")
+        return "\n\n".join(snippets)
 
     def rebuild_index(self) -> dict[str, Any]:
         """Refresh the workspace codebase index."""
@@ -158,7 +196,14 @@ class ContextManager:
         self.persist()
 
     def persist(self) -> None:
-        data = {
+        data = self._state_snapshot()
+        tmp_path = self.metadata_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(self.metadata_path)
+        self.session_store.write_state(status="active", extra=data)
+
+    def _state_snapshot(self) -> dict[str, Any]:
+        return {
             "workspace": str(self.workspace),
             "history_messages": len(self.history),
             "turns": len(self.history) // 2,
@@ -173,9 +218,54 @@ class ContextManager:
             "index_truncated": self.index.truncated,
             "updated_at": datetime.now().isoformat(),
         }
-        tmp_path = self.metadata_path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp_path.replace(self.metadata_path)
+
+    def _restore_state(self) -> None:
+        state = self.session_store.read_state()
+        self.compact_summary = str(state.get("compact_summary") or self.compact_summary)
+        tool_usage = state.get("tool_usage")
+        if isinstance(tool_usage, list):
+            self.tool_usage = [entry for entry in tool_usage if isinstance(entry, dict)][-50:]
+
+        attachments = state.get("attachments")
+        if isinstance(attachments, list):
+            restored: list[Path] = []
+            for item in attachments:
+                raw_path = item.get("path") if isinstance(item, dict) else item
+                if not raw_path:
+                    continue
+                path = Path(str(raw_path)).expanduser()
+                if not path.is_absolute():
+                    path = self.workspace / path
+                try:
+                    resolved = path.resolve()
+                except OSError:
+                    continue
+                if resolved.is_file() and resolved not in restored:
+                    restored.append(resolved)
+            self.attachments = restored
+
+    def _can_inline_context_file(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(self.workspace)
+            stat = resolved.stat()
+        except (OSError, ValueError):
+            return False
+        if stat.st_size > MAX_INLINE_TEXT_BYTES:
+            return False
+        return resolved.suffix.lower() in TEXT_EXTENSIONS
+
+    def _message_text(self, message: dict[str, Any] | str) -> str:
+        if isinstance(message, str):
+            return message
+        content = message.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "input_text":
+                    parts.append(str(item.get("text", "")))
+            return " ".join(parts)
+        return str(content)
 
     def _attachment_info(self, path: Path) -> dict[str, Any]:
         try:
