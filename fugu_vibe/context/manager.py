@@ -8,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from fugu_vibe.context.index import CodebaseIndex
+from fugu_vibe.context.session_store import SessionStore
+
 
 @dataclass
 class ContextSummary:
@@ -19,6 +22,11 @@ class ContextSummary:
     compacted: bool
     compact_summary_chars: int
     metadata_path: Path
+    session_id: str
+    session_path: Path
+    index_path: Path
+    indexed_files: int
+    index_truncated: bool
 
 
 @dataclass
@@ -26,15 +34,24 @@ class ContextManager:
     """Track conversation history, attachments, and compacted context."""
 
     workspace: Path = field(default_factory=Path.cwd)
+    session_id: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
     attachments: list[Path] = field(default_factory=list)
     tool_usage: list[dict[str, Any]] = field(default_factory=list)
     compact_summary: str = ""
+    index: CodebaseIndex = field(init=False)
+    session_store: SessionStore = field(init=False)
 
     def __post_init__(self) -> None:
         self.workspace = self.workspace.expanduser().resolve()
         self.metadata_path = self.workspace / ".fugu-vibe" / "context" / "current.json"
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        self.index = CodebaseIndex(self.workspace)
+        self.index.load_or_build()
+        self.session_store = SessionStore(self.workspace, session_id=self.session_id)
+        self.session_id = self.session_store.session_id
+        if self.session_store.history_path.stat().st_size > 0 and not self.history:
+            self.history = self.session_store.load_messages()
         self.persist()
 
     def add_attachment(self, path: Path) -> Path:
@@ -50,9 +67,16 @@ class ContextManager:
         self.attachments.clear()
         self.persist()
 
-    def add_turn(self, user_message: dict[str, Any], assistant_content: str) -> None:
+    def add_turn(
+        self,
+        user_message: dict[str, Any],
+        assistant_content: str,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        assistant_message = {"role": "assistant", "content": assistant_content}
         self.history.append(user_message)
-        self.history.append({"role": "assistant", "content": assistant_content})
+        self.history.append(assistant_message)
+        self.session_store.record_turn(user_message, assistant_content, tool_calls=tool_calls)
         self.persist()
 
     def messages_for(self, user_message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -64,9 +88,26 @@ class ContextManager:
                     "content": "Conversation summary so far:\n" + self.compact_summary,
                 }
             )
+        if self.index.files:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Codebase overview for routing and context selection:\n" + self.index.overview(),
+                }
+            )
         messages.extend(self.history)
         messages.append(user_message)
         return messages
+
+    def rebuild_index(self) -> dict[str, Any]:
+        """Refresh the workspace codebase index."""
+        data = self.index.build()
+        self.persist()
+        return data
+
+    def select_context_files(self, query: str, max_files: int = 10) -> list[dict[str, Any]]:
+        """Select likely relevant files from the codebase index."""
+        return self.index.select_for_context(query, max_files=max_files)
 
     def compact(self, keep_recent_turns: int = 3) -> str:
         """Compact older turns into a local summary and keep recent turns verbatim."""
@@ -97,6 +138,11 @@ class ContextManager:
             compacted=bool(self.compact_summary),
             compact_summary_chars=len(self.compact_summary),
             metadata_path=self.metadata_path,
+            session_id=str(self.session_store.session_id),
+            session_path=self.session_store.history_path,
+            index_path=self.index.cache_path or self.workspace / ".fugu-vibe" / "index.json",
+            indexed_files=len(self.index.files),
+            index_truncated=self.index.truncated,
         )
 
     def record_tool_usage(self, name: str, arguments: dict[str, Any], result_count: int | None = None) -> None:
@@ -120,6 +166,11 @@ class ContextManager:
             "tool_usage": self.tool_usage,
             "compacted": bool(self.compact_summary),
             "compact_summary": self.compact_summary,
+            "session_id": self.session_store.session_id,
+            "session_path": str(self.session_store.history_path),
+            "index_path": str(self.index.cache_path),
+            "indexed_files": len(self.index.files),
+            "index_truncated": self.index.truncated,
             "updated_at": datetime.now().isoformat(),
         }
         tmp_path = self.metadata_path.with_suffix(".json.tmp")

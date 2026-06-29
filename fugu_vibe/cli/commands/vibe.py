@@ -19,17 +19,25 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
-from fugu_vibe.api.client import FuguClient
 from fugu_vibe.agent import AgentLoop, ToolRegistry
+from fugu_vibe.api.client import FuguClient
 from fugu_vibe.context import ContextManager
 from fugu_vibe.core.attachments import build_content_parts
-from fugu_vibe.core.event_bus import EventBus, EventType
+from fugu_vibe.core.event_bus import EventBus
 from fugu_vibe.core.event_log import EventLogWriter
 from fugu_vibe.core.orchestration import OrchestrationAnalyzer
 from fugu_vibe.core.patch_capture import capture_unified_diff
 from fugu_vibe.core.session_output import SessionOutputWriter
 from fugu_vibe.core.task_manager import TaskManager
-from fugu_vibe.tools import FileToolError, FileTools, PatchTool, PatchToolError, TerminalTool, TerminalToolError
+from fugu_vibe.tools import (
+    FileToolError,
+    FileTools,
+    GitTools,
+    PatchTool,
+    PatchToolError,
+    TerminalTool,
+    TerminalToolError,
+)
 from fugu_vibe.ui.dashboard import OrchestrationDashboard
 
 if TYPE_CHECKING:
@@ -38,9 +46,9 @@ if TYPE_CHECKING:
 console = Console()
 
 CODING_AGENT_INSTRUCTIONS = """You are operating inside fugu-vibe as a controlled coding agent.
-Use file tools to inspect and modify the workspace when needed. Available automatic tools: file_list, file_read, file_search, file_mkdir, and file_write.
-For implementation tasks, write the requested project files directly with file_mkdir and file_write. Keep writes inside the selected workspace.
-After writing files, summarize exactly what you created or changed and how to run it.
+Use structured tools to inspect, modify, run, and verify workspace changes. Available automatic tools include file_list, file_glob, file_read, file_search, file_grep, file_edit, file_delete, file_mkdir, file_write, bash, run_test, run_lint, git_status, git_diff, git_log, and git_show.
+Prefer file_edit for local edits instead of full-file rewrites. Keep all writes inside the selected workspace.
+After changing files, verify with run_test/run_lint or explain why verification was not run, then summarize exactly what changed.
 If direct writes are not safe or fail, produce a git apply compatible unified diff as a fallback.
 Avoid repeatedly calling the same tool with the same arguments.
 """
@@ -65,6 +73,12 @@ Avoid repeatedly calling the same tool with the same arguments.
     help="Attach a PDF, image, or file to each prompt. Can be used multiple times.",
 )
 @click.option("--unlimited", "-u", is_flag=True, help="Unlimited prompt mode (no guardrails)")
+@click.option(
+    "--resume",
+    "resume_session",
+    default=None,
+    help="Resume a persisted session id. Use 'latest' to resume the most recent session.",
+)
 @click.pass_context
 def vibe_command(
     ctx: click.Context,
@@ -75,13 +89,14 @@ def vibe_command(
     voice: bool,
     files: tuple[Path, ...],
     unlimited: bool,
+    resume_session: str | None,
 ) -> None:
     """
     🚀 Start interactive vibe coding session.
-    
+
     This is the main command - opens a full-screen dashboard with
     real-time orchestration visualization, and accepts text/voice input.
-    
+
     Examples:
         fugu-vibe vibe                          # Default session
         fugu-vibe vibe --model fugu-ultra       # Use Fugu Ultra
@@ -95,7 +110,7 @@ def vibe_command(
     config: Config = ctx.obj["config"]
     config_path: Path | None = ctx.obj.get("config_path")
     workspace: Path = ctx.obj.get("workspace", Path.cwd())
-    
+
     # Override with CLI options
     if model:
         config.model.default = model
@@ -103,9 +118,9 @@ def vibe_command(
         config.model.reasoning_effort = effort  # type: ignore
     if unlimited:
         config.prompt.unlimited_mode = True
-    
+
     # Run async session
-    asyncio.run(_vibe_session(config, web_search, viz, voice, list(files), workspace, config_path))
+    asyncio.run(_vibe_session(config, web_search, viz, voice, list(files), workspace, config_path, resume_session))
 
 
 async def _vibe_session(
@@ -116,19 +131,20 @@ async def _vibe_session(
     initial_files: list[Path],
     workspace: Path,
     config_path: Path | None,
+    resume_session: str | None,
 ) -> None:
     """Main vibe session loop."""
-    
+
     # Initialize components
     event_bus = EventBus()
     event_log = EventLogWriter(event_bus)
     event_log.start()
     await event_bus.start()
-    
+
     fugu_client = FuguClient(config)
     task_manager = TaskManager(config, fugu_client, event_bus)
     await task_manager.start()
-    
+
     # Start dashboard
     dashboard = None
     if viz_enabled:
@@ -136,7 +152,7 @@ async def _vibe_session(
             "[yellow]Inline dashboard is disabled to keep keyboard input stable.[/yellow] "
             "[dim]Run `fugu-vibe dashboard` in a second terminal instead.[/dim]"
         )
-    
+
     # Start voice if requested
     voice_pipeline = None
     if voice_enabled:
@@ -147,18 +163,17 @@ async def _vibe_session(
             console.print("[green]🎤 Voice input enabled (press Space to talk)[/green]")
         except RuntimeError as e:
             console.print(f"[yellow]Voice unavailable: {e}[/yellow]")
-    
+
     # Prompt session for keyboard input
     session = PromptSession(
         message="> ",
         multiline=False,
         enable_suspend=True,
     )
-    output_writer = SessionOutputWriter()
-    context = ContextManager()
+    context = ContextManager(workspace, session_id=resume_session)
+    output_writer = SessionOutputWriter(workspace)
     file_tools = FileTools(Path.cwd())
     patch_tool = PatchTool(Path.cwd())
-    tool_registry = ToolRegistry(file_tools)
     terminal_tool = TerminalTool(
         Path.cwd(),
         enabled=config.tools.terminal_enabled,
@@ -166,9 +181,14 @@ async def _vibe_session(
         timeout_seconds=config.tools.terminal_timeout_seconds,
         max_output_chars=config.tools.max_output_chars,
     )
+    tool_registry = ToolRegistry(
+        file_tools,
+        terminal_tool=terminal_tool,
+        git_tools=GitTools(Path.cwd(), max_output_chars=config.tools.max_output_chars),
+    )
     for path in initial_files:
         context.add_attachment(path)
-    
+
     console.print("\n[bold cyan]🐡 Fugu Vibe Session Started[/bold cyan]")
     console.print(f"[dim]Workspace: {workspace}[/dim]")
     console.print(f"[dim]Config: {config_path or 'defaults only'}[/dim]")
@@ -178,23 +198,27 @@ async def _vibe_session(
             "[yellow]No .fugu-vibe.toml or user config was found; using the default Sakana API URL.[/yellow] "
             "[dim]Use -C, --config, --base-url, or FUGU_VIBE_API_BASE_URL to select your proxy.[/dim]"
         )
+    if resume_session:
+        console.print(f"[green]Resumed session:[/green] {context.session_store.session_id}")
+        console.print(f"[dim]Loaded {len(context.history) // 2} prior turn(s).[/dim]")
+
     console.print("Type your prompt and press Enter")
-    console.print("Commands: /context /compact /ls /read /search /diff /apply /tools /terminal /quit /help")
+    console.print("Commands: /context /index /select /compact /ls /read /search /diff /apply /tools /terminal /quit /help")
     console.print("Exit: Ctrl+C or Ctrl+D\n")
     console.print(f"[dim]Session output: {output_writer.path}[/dim]")
     if context.attachments:
         console.print(f"[dim]Attached {len(context.attachments)} file(s). Use /files to list them.[/dim]\n")
-    
+
     try:
         while True:
             try:
                 # Get user input
                 user_input = await session.prompt_async()
                 user_input = user_input.strip()
-                
+
                 if not user_input:
                     continue
-                
+
                 # Handle commands
                 if user_input.startswith("/"):
                     await _handle_command(
@@ -210,7 +234,7 @@ async def _vibe_session(
                         session,
                     )
                     continue
-                
+
                 # Send to Fugu
                 await _send_to_fugu(
                     user_input,
@@ -222,12 +246,12 @@ async def _vibe_session(
                     output_writer,
                     tool_registry,
                 )
-                
+
             except KeyboardInterrupt:
                 break
             except EOFError:
                 break
-                
+
     finally:
         # Cleanup
         if voice_pipeline:
@@ -237,7 +261,7 @@ async def _vibe_session(
         await task_manager.close()
         await event_bus.close()
         await fugu_client.close()
-        
+
         console.print("\n[dim]Session ended.[/dim]")
 
 
@@ -257,10 +281,10 @@ async def _send_to_fugu(
     content = build_content_parts(prompt, files) if files else prompt
     user_message = {"role": "user", "content": content}
     messages = context.messages_for(user_message)
-    
+
     # Initialize orchestration analyzer
     analyzer = OrchestrationAnalyzer(config, event_bus)
-    
+
     console.print(f"\n[dim]> {prompt[:80]}{'...' if len(prompt) > 80 else ''}[/dim]")
     if files:
         names = ", ".join(path.name for path in files)
@@ -268,7 +292,7 @@ async def _send_to_fugu(
     console.print("[dim]Thinking...[/dim]", end="")
     output_writer.start_turn(prompt, files)
     response_parts: list[str] = []
-    
+
     try:
         def on_content(content_piece: str):
             if content_piece:
@@ -295,8 +319,10 @@ async def _send_to_fugu(
             context.record_tool_usage("agent.tools", {"count": len(result.tool_calls)}, len(result.tool_calls))
         if result.content and not response_parts:
             on_content(result.content)
-                     
+        tool_calls = result.tool_calls
+
     except Exception as e:
+        tool_calls = []
         console.print(f"\n[red]Error: {e}[/red]")
     finally:
         response = "".join(response_parts)
@@ -314,7 +340,7 @@ async def _send_to_fugu(
                         f"\n[yellow]Saved proposed patch, but git apply --check failed:[/yellow] {captured_patch.latest_path}\n"
                         f"[red]{e}[/red]"
                     )
-            context.add_turn(user_message, response)
+            context.add_turn(user_message, response, tool_calls=tool_calls)
         await analyzer.finalize()
         output_writer.end_turn()
         console.print("\n")
@@ -335,14 +361,14 @@ async def _handle_command(
     """Handle slash commands."""
     parts = cmd.split()
     command = parts[0].lower()
-    
+
     if command in ("/quit", "/q", "/exit"):
         raise EOFError()
-        
+
     elif command == "/status":
         status = await task_manager.status()
         console.print(f"\nRunning: {status['running']}, Queued: {status['queued']}")
-        
+
     elif command == "/tasks":
         status = await task_manager.status()
         for task in status["tasks"]:
@@ -370,6 +396,20 @@ async def _handle_command(
 
     elif command == "/context":
         _print_context(context)
+
+    elif command == "/index":
+        data = context.rebuild_index()
+        console.print(
+            f"[green]Indexed {data['count']} file(s)[/green]"
+            f"{' [yellow](truncated)[/yellow]' if data.get('truncated') else ''}"
+        )
+
+    elif command == "/select":
+        query = cmd[len("/select") :].strip()
+        if not query:
+            console.print("[red]Usage:[/red] /select QUERY")
+        else:
+            _print_selected_context_files(context, query)
 
     elif command == "/compact":
         console.print(f"[green]{context.compact()}[/green]")
@@ -420,7 +460,7 @@ async def _handle_command(
         else:
             result_count = await _run_terminal_command(terminal_tool, command_text)
             context.record_tool_usage("terminal.run", {"command": command_text}, result_count)
-            
+
     elif command == "/help":
         console.print("\n[bold]Commands:[/bold]")
         console.print("  /quit, /q     - Exit session")
@@ -437,6 +477,9 @@ async def _handle_command(
         console.print("  /files        - List attached files")
         console.print("  /clear-files  - Remove all attached files")
         console.print("  /status       - Show system status")
+        console.print("  /index        - Rebuild workspace codebase index")
+        console.print("  /select QUERY - Show files likely relevant to a query")
+
         console.print("  /tasks        - List active tasks")
         console.print("  /help         - Show this help")
         console.print("")
@@ -459,6 +502,11 @@ def _print_context(context: ContextManager) -> None:
     if summary.compacted:
         console.print(f"  Compact summary chars: {summary.compact_summary_chars}")
     console.print(f"  Metadata: {summary.metadata_path}")
+    console.print(f"  Session: {summary.session_id}")
+    console.print(f"  Session history: {summary.session_path}")
+    console.print(f"  Index: {summary.indexed_files} file(s) at {summary.index_path}")
+    if summary.index_truncated:
+        console.print("  Index truncated: yes")
 
     if summary.attachments:
         table = Table(show_header=True)
@@ -481,6 +529,27 @@ def _format_size(size: int | None) -> str:
     if size < 1024 * 1024:
         return f"{size / 1024:.1f} KB"
     return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _print_selected_context_files(context: ContextManager, query: str) -> int:
+    matches = context.select_context_files(query)
+    if not matches:
+        console.print("[dim]No indexed files matched.[/dim]")
+        return 0
+    table = Table(show_header=True)
+    table.add_column("Score order")
+    table.add_column("File")
+    table.add_column("Language")
+    table.add_column("Symbols")
+    for index, entry in enumerate(matches, start=1):
+        table.add_row(
+            str(index),
+            str(entry.get("path", "")),
+            str(entry.get("language", "")),
+            ", ".join(str(symbol) for symbol in entry.get("symbols", [])[:6]),
+        )
+    console.print(table)
+    return len(matches)
 
 
 def _print_file_list(file_tools: FileTools, pattern: str) -> int:

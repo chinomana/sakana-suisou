@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -113,8 +112,8 @@ class ToolConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_TOOLS_")
 
-    terminal_enabled: bool = False
-    terminal_approval: Literal["off", "ask", "auto-safe"] = "off"
+    terminal_enabled: bool = True
+    terminal_approval: Literal["off", "ask", "auto-safe"] = "auto-safe"
     terminal_timeout_seconds: int = 120
     max_output_chars: int = 20_000
 

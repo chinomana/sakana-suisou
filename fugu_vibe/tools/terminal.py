@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 DANGEROUS_PATTERNS = (
     "rm -rf",
     "git reset --hard",
@@ -58,6 +57,24 @@ class TerminalResult:
     duration_seconds: float
     timed_out: bool
     log_path: Path
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a structured, JSON-serializable result."""
+        return {
+            "run_id": self.run_id,
+            "command": self.command,
+            "cwd": str(self.cwd),
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "duration_seconds": self.duration_seconds,
+            "timed_out": self.timed_out,
+            "log_path": str(self.log_path),
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
+        }
 
 
 @dataclass
@@ -103,7 +120,7 @@ class TerminalTool:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 process.communicate(), timeout=self.timeout_seconds
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timed_out = True
             process.kill()
             stdout_bytes, stderr_bytes = await process.communicate()
@@ -122,17 +139,26 @@ class TerminalTool:
             duration_seconds=(finished - started).total_seconds(),
             timed_out=timed_out,
         )
+        truncated_stdout, stdout_truncated = self._truncate(stdout)
+        truncated_stderr, stderr_truncated = self._truncate(stderr)
         return TerminalResult(
             run_id=run_id,
             command=command,
             cwd=resolved_cwd,
             exit_code=process.returncode,
-            stdout=self._truncate(stdout),
-            stderr=self._truncate(stderr),
+            stdout=truncated_stdout,
+            stderr=truncated_stderr,
             duration_seconds=(finished - started).total_seconds(),
             timed_out=timed_out,
             log_path=log_path,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
+
+    async def run_structured(self, command: str, cwd: str | Path | None = None) -> dict[str, Any]:
+        """Run a command and return a JSON-serializable result."""
+        return (await self.run(command, cwd=cwd)).to_dict()
+
 
     def _check_command(self, command: str) -> None:
         normalized = " ".join(command.strip().split())
@@ -158,11 +184,11 @@ class TerminalTool:
             raise TerminalToolError(f"cwd escapes workspace: {cwd}")
         return resolved
 
-    def _truncate(self, text: str) -> str:
+    def _truncate(self, text: str) -> tuple[str, bool]:
         if len(text) <= self.max_output_chars:
-            return text
+            return text, False
         omitted = len(text) - self.max_output_chars
-        return text[: self.max_output_chars] + f"\n...[truncated {omitted} chars]"
+        return text[: self.max_output_chars] + f"\n...[truncated {omitted} chars]", True
 
     def _write_log(
         self,

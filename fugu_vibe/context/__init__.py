@@ -1,5 +1,7 @@
 """Context management for Fugu Vibe sessions."""
 
+from fugu_vibe.context.index import CodebaseIndex
 from fugu_vibe.context.manager import ContextManager
+from fugu_vibe.context.session_store import SessionStore
 
-__all__ = ["ContextManager"]
+__all__ = ["CodebaseIndex", "ContextManager", "SessionStore"]
