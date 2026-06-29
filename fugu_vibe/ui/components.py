@@ -77,12 +77,25 @@ class TokenMeter:
         self.input_tokens = 0
         self.output_tokens = 0
         self.orchestration_tokens = 0
+        self.estimated_cost_usd: float | None = None
+        self.budget_alert: dict | None = None
 
-    def update(self, input_tokens: int = 0, output_tokens: int = 0, orchestration_tokens: int = 0) -> None:
+    def update(
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        orchestration_tokens: int = 0,
+        estimated_cost_usd: float | None = None,
+        budget_alert: dict | None = None,
+    ) -> None:
         """Update token counts."""
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.orchestration_tokens = orchestration_tokens
+        if estimated_cost_usd is not None:
+            self.estimated_cost_usd = estimated_cost_usd
+        if budget_alert is not None:
+            self.budget_alert = budget_alert
 
     def render(self) -> Table:
         """Render token meter as Rich Table."""
@@ -134,6 +147,15 @@ class TokenMeter:
                 "",
                 style="dim" if ratio < 20 else "yellow" if ratio < 50 else "red",
             )
+
+        if self.estimated_cost_usd is not None:
+            table.add_row("💵 Est. Cost", f"${self.estimated_cost_usd:.4f}", "", style="cyan")
+
+        if self.budget_alert:
+            level = str(self.budget_alert.get("level", "warning"))
+            message = str(self.budget_alert.get("message", "Token budget alert"))
+            style = "red" if level == "critical" else "yellow"
+            table.add_row("🚨 Budget", level.upper(), Text(message[:20], style=style), style=style)
 
         return table
 

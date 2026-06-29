@@ -61,6 +61,8 @@ class OrchestrationDashboard:
         self._orch_state = OrchestrationState()
         self._stream_content: list[str] = []
         self._max_content_lines = 50
+        self._routing_confidence: float | None = None
+        self._last_budget_alert: dict | None = None
         self._running = False
         self._live: Live | None = None
         self._update_task: asyncio.Task | None = None
@@ -208,6 +210,13 @@ class OrchestrationDashboard:
         header_text.append(f"Workers: {self._orch_state.active_workers}", style="cyan")
         header_text.append("  |  ", style="dim")
         header_text.append(f"Elapsed: {self._orch_state.elapsed:.1f}s", style="green")
+        if self._routing_confidence is not None:
+            header_text.append("  |  ", style="dim")
+            header_text.append(f"Routing: {self._routing_confidence:.0%}", style="magenta")
+        if self._last_budget_alert:
+            header_text.append("  |  ", style="dim")
+            level = str(self._last_budget_alert.get("level", "warning")).upper()
+            header_text.append(f"Budget: {level}", style="red" if level == "CRITICAL" else "yellow")
 
         return Panel(header_text, style="on_dark_blue")
 
@@ -241,7 +250,10 @@ class OrchestrationDashboard:
         self._orch_state.phase = OrchestrationPhase.ROUTING
         self._orch_state.routing_model = event.data.get("model")
         self._orch_state.routing_confidence = event.data.get("confidence")
-        self.timeline.add_event("🧭", f"Routing: {event.data.get('model', 'unknown')}", "cyan")
+        self._routing_confidence = event.data.get("confidence")
+        model = event.data.get("model", "unknown")
+        message = event.data.get("message") or f"Routing: {model}"
+        self.timeline.add_event("🧭", message, "cyan")
 
     def _on_worker(self, event: Event) -> None:
         self._orch_state.phase = OrchestrationPhase.WORKER_ACTIVE
@@ -283,17 +295,22 @@ class OrchestrationDashboard:
         self._stream_content.append(f"[tool:{status}] {name} {summary}".rstrip())
 
     def _on_stream_token_usage(self, event: Event) -> None:
-        self.token_meter.update(
-            input_tokens=event.data.get("input_tokens", 0),
-            output_tokens=event.data.get("output_tokens", 0),
-            orchestration_tokens=event.data.get("orchestration_tokens", 0),
-        )
+        self._update_token_meter(event.data)
 
     def _on_token_update(self, event: Event) -> None:
+        self._update_token_meter(event.data)
+
+    def _update_token_meter(self, data: dict) -> None:
+        budget_alert = data.get("budget_alert") if isinstance(data.get("budget_alert"), dict) else None
+        if budget_alert:
+            self._last_budget_alert = budget_alert
+            self._stream_content.append(f"[budget:{budget_alert.get('level')}] {budget_alert.get('message')}")
         self.token_meter.update(
-            input_tokens=event.data.get("input_tokens", 0),
-            output_tokens=event.data.get("output_tokens", 0),
-            orchestration_tokens=event.data.get("orchestration_tokens", 0),
+            input_tokens=data.get("input_tokens", self.token_meter.input_tokens),
+            output_tokens=data.get("output_tokens", self.token_meter.output_tokens),
+            orchestration_tokens=data.get("orchestration_tokens", self.token_meter.orchestration_tokens),
+            estimated_cost_usd=data.get("estimated_cost_usd") or (budget_alert or {}).get("estimated_cost_usd"),
+            budget_alert=budget_alert,
         )
 
     def _on_task_update(self, event: Event) -> None:

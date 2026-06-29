@@ -124,6 +124,15 @@ class ToolConfig(BaseSettings):
     max_output_chars: int = 20_000
 
 
+class MCPConfig(BaseSettings):
+    """Model Context Protocol integration settings."""
+
+    model_config = SettingsConfigDict(env_prefix="FUGU_VIBE_MCP_")
+
+    enabled: bool = True
+    timeout_seconds: float = 30.0
+
+
 class SafetyConfig(BaseSettings):
     """Safety governance and rollback settings."""
 
@@ -157,6 +166,7 @@ class Config(BaseSettings):
     tasks: TaskConfig = Field(default_factory=TaskConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     patch: PatchConfig = Field(default_factory=PatchConfig)
 

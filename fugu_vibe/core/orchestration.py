@@ -406,7 +406,14 @@ class OrchestrationAnalyzer:
         if self.event_bus:
             await self.event_bus.emit(
                 EventType.STREAM_TOKEN_USAGE,
-                data={"budget_alert": alert.to_dict()},
+                data={
+                    "input_tokens": self.state.token_usage.input_tokens,
+                    "output_tokens": self.state.token_usage.output_tokens,
+                    "orchestration_tokens": self.state.token_usage.orchestration_tokens,
+                    "total_tokens": self.state.token_usage.total_tokens,
+                    "budget_alert": alert.to_dict(),
+                    "estimated_cost_usd": alert.estimated_cost_usd,
+                },
                 source="orchestration_analyzer",
             )
 

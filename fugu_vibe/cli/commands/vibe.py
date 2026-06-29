@@ -32,6 +32,7 @@ from fugu_vibe.core.orchestration import OrchestrationAnalyzer
 from fugu_vibe.core.patch_capture import capture_unified_diff
 from fugu_vibe.core.session_output import SessionOutputWriter
 from fugu_vibe.core.task_manager import TaskManager
+from fugu_vibe.mcp import MCPConfigStore, MCPToolManager
 from fugu_vibe.tools import (
     FileToolError,
     FileTools,
@@ -194,11 +195,18 @@ async def _vibe_session(
         answer = await session.prompt_async("Approve this change? Type 'yes' to continue: ")
         return answer.strip().lower() == "yes"
 
+    mcp_tools = None
+    if config.mcp.enabled:
+        mcp_tools = MCPToolManager(
+            MCPConfigStore(workspace),
+            timeout_seconds=config.mcp.timeout_seconds,
+        )
     tool_registry = ToolRegistry(
         file_tools,
         terminal_tool=terminal_tool,
         git_tools=GitTools(Path.cwd(), max_output_chars=config.tools.max_output_chars),
         approval_callback=approve_tool_operation,
+        mcp_tools=mcp_tools,
     )
     for path in initial_files:
         context.add_attachment(path)

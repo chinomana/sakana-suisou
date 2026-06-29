@@ -8,6 +8,8 @@ Commands:
     attach    Attach to a running task
     cancel    Cancel a task
     dashboard View a running workspace dashboard
+    run       Run one prompt headlessly
+    mcp       Manage MCP servers
     voice     Voice-controlled task submission
     config    Manage configuration
     models    List available models
@@ -29,7 +31,9 @@ from fugu_vibe.cli.commands.auth import auth_command
 from fugu_vibe.cli.commands.cancel import cancel_command
 from fugu_vibe.cli.commands.config import config_command
 from fugu_vibe.cli.commands.dashboard import dashboard_command
+from fugu_vibe.cli.commands.mcp import mcp_command
 from fugu_vibe.cli.commands.models import models_command
+from fugu_vibe.cli.commands.run import run_command
 from fugu_vibe.cli.commands.status import status_command
 from fugu_vibe.cli.commands.submit import submit_command
 from fugu_vibe.cli.commands.vibe import vibe_command
@@ -86,6 +90,7 @@ def cli(ctx: click.Context, config_path: str | None, workspace_path: Path | None
         fugu-vibe auth login                    # Set up API key
         fugu-vibe vibe                          # Start interactive session
         fugu-vibe submit "Refactor auth" -p "..."  # Submit task
+        fugu-vibe run --script task.md --json       # Headless CI/SDK mode
     """
     setup_logging(verbose)
 
@@ -149,6 +154,8 @@ cli.add_command(status_command, name="status")
 cli.add_command(attach_command, name="attach")
 cli.add_command(cancel_command, name="cancel")
 cli.add_command(dashboard_command, name="dashboard")
+cli.add_command(run_command, name="run")
+cli.add_command(mcp_command, name="mcp")
 cli.add_command(voice_command, name="voice")
 cli.add_command(config_command, name="config")
 cli.add_command(models_command, name="models")

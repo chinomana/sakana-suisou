@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from fugu_vibe.mcp import MCPToolManager
 from fugu_vibe.tools import (
     FileToolError,
     FileTools,
@@ -31,6 +32,7 @@ class ToolRegistry:
     terminal_tool: TerminalTool | None = None
     git_tools: GitTools | None = None
     approval_callback: ApprovalCallback | None = None
+    mcp_tools: MCPToolManager | None = None
 
     def schemas(self) -> list[dict[str, Any]]:
         schemas = [
@@ -169,6 +171,8 @@ class ToolRegistry:
                     ),
                 ]
             )
+        if self.mcp_tools is not None:
+            schemas.extend(self.mcp_tools.schemas())
         return schemas
 
     async def approve_file_operation(self, name: str, args: dict[str, Any]) -> bool:
@@ -298,6 +302,14 @@ class ToolRegistry:
                 return {"ok": True, **self._git().log(limit=int(args.get("limit", 10)))}
             if name == "git_show":
                 return {"ok": True, **self._git().show(revision=str(args.get("revision", "HEAD")))}
+            if name == "mcp_list_tools" and self.mcp_tools is not None:
+                return {"ok": True, **await self.mcp_tools.list_tools(str(args.get("server") or "") or None)}
+            if name == "mcp_call" and self.mcp_tools is not None:
+                return await self.mcp_tools.call_tool(
+                    str(args["server"]),
+                    str(args["tool"]),
+                    args.get("arguments") if isinstance(args.get("arguments"), dict) else {},
+                )
         except (KeyError, ValueError, FileToolError, TerminalToolError, GitToolError) as e:
             return self._tool_error(name, e, args)
 

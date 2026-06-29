@@ -16,7 +16,9 @@ This project is early-stage. The stable path is the normal text-based `vibe` ses
 - Session output: saved under `.fugu-vibe/sessions/` in the selected workspace.
 - Async task status/output: saved under `.fugu-vibe/tasks/` in the selected workspace.
 - Runtime workspace artifacts under `.fugu-vibe/` and `.fugu-worktrees/` are ignored by git.
-- Orchestration dashboard: optional via `--viz`; disabled by default because full-screen rendering can interfere with terminal input.
+- Orchestration dashboard: optional via `--viz` or `fugu-vibe dashboard`; shows live token usage, orchestration ratio, and budget alerts.
+- Headless mode: usable via `fugu-vibe run` for CI/SDK-style one-shot execution.
+- MCP integration: experimental stdio MCP servers can be registered and exposed through `mcp_list_tools` / `mcp_call`.
 - Voice mode: placeholder only. The recorder/STT scaffolding exists, but push-to-talk/background voice interaction is not fully implemented yet.
 
 This CLI sends prompts and file context to Fugu and records the output. It does not yet automatically apply model-generated patches to your source tree.
@@ -123,7 +125,7 @@ Current context metadata is written to:
 
 Workspace file inspection commands are read-only and constrained to the selected workspace. They skip runtime/cache directories such as `.git/`, `.fugu-vibe/`, `.venv/`, and `node_modules/`.
 
-The interactive session can execute Fugu function calls for workspace file tools (`file_list`, `file_read`, `file_search`, `file_mkdir`, `file_write`). Terminal execution is not exposed for automatic model calls.
+The interactive session can execute Fugu function calls for workspace file, terminal, git, and MCP bridge tools when those tool groups are enabled by policy.
 
 Terminal execution is disabled by default. To enable manual terminal runs in `vibe`, set:
 
@@ -161,6 +163,34 @@ fugu-vibe -C /path/to/project dashboard
 ```
 
 The two-terminal dashboard reads `.fugu-vibe/events.jsonl` in the selected workspace. It only shows events produced after `vibe` starts.
+
+
+## Headless Runs and MCP
+
+Run one prompt without entering the interactive prompt:
+
+```bash
+fugu-vibe run "Summarize this repository"
+fugu-vibe run --script task.md --json
+```
+
+`--json` returns a structured result with `ok`, `content`, `tool_calls`, `rounds`, and selected `effort`, which is useful for CI or SDK-style integrations.
+
+Register stdio MCP servers per workspace:
+
+```bash
+fugu-vibe mcp add filesystem python path/to/server.py
+fugu-vibe mcp list
+fugu-vibe mcp tools filesystem
+```
+
+When MCP is enabled, Fugu can discover server tools through `mcp_list_tools` and call them through `mcp_call`. MCP configuration is stored under `.fugu-vibe/mcp.json` and is ignored by git.
+
+```toml
+[mcp]
+enabled = true
+timeout_seconds = 30
+```
 
 ## Working In A Specific Workspace
 
