@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from fugu_vibe.agent.registry import ToolRegistry
@@ -19,6 +21,7 @@ DEFAULT_MAX_TOOL_ROUNDS = 10
 DEFAULT_AUTO_TEST_COMMAND = "python -m pytest -q"
 MUTATING_TOOLS = {"file_write", "file_edit", "file_delete", "file_mkdir"}
 VALIDATION_TOOLS = {"run_test", "run_lint", "bash"}
+PYTHON_SUFFIXES = {".py", ".pyw"}
 
 
 @dataclass
@@ -40,7 +43,9 @@ class AgentLoop:
     max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
     auto_test_after_edit: bool = True
     auto_test_command: str = DEFAULT_AUTO_TEST_COMMAND
+    auto_compile_after_edit: bool = True
     _auto_test_counter: int = field(default=0, init=False)
+    _auto_compile_counter: int = field(default=0, init=False)
 
     async def run(
         self,
@@ -64,6 +69,18 @@ class AgentLoop:
             tool_calls: list[dict[str, Any]] = []
             output_items: list[dict[str, Any]] = []
             local_tools = self.registry.schemas() if allow_tools else None
+            tool_names = [str(schema.get("name", "")) for schema in local_tools or []]
+            await self.event_bus.emit(
+                EventType.AGENT_ROUND_START,
+                {
+                    "round": round_index + 1,
+                    "max_rounds": self.max_tool_rounds,
+                    "tools_enabled": bool(local_tools),
+                    "tool_count": len(tool_names),
+                    "tool_names": tool_names,
+                },
+                source="agent_loop",
+            )
             await self.event_bus.emit(
                 EventType.STREAM_REASONING,
                 {
@@ -121,6 +138,11 @@ class AgentLoop:
                         {"content": content},
                         source="agent_loop",
                     )
+                await self.event_bus.emit(
+                    EventType.AGENT_DONE,
+                    {"rounds": result.rounds, "tool_calls": len(result.tool_calls)},
+                    source="agent_loop",
+                )
                 return result
             if round_index >= self.max_tool_rounds:
                 message = "\n[Stopped: maximum tool rounds reached. Answering with the information gathered so far.]"
@@ -130,6 +152,11 @@ class AgentLoop:
                 await self.event_bus.emit(
                     EventType.STREAM_CONTENT,
                     {"content": message},
+                    source="agent_loop",
+                )
+                await self.event_bus.emit(
+                    EventType.AGENT_STOPPED,
+                    {"reason": "max_tool_rounds", "rounds": result.rounds},
                     source="agent_loop",
                 )
                 return result
@@ -154,6 +181,7 @@ class AgentLoop:
             call_items = self._tool_call_items(new_tool_calls, output_items)
             current_messages.extend(call_items)
             mutation_without_validation = False
+            mutated_paths: set[str] = set()
             for tool_call in new_tool_calls:
                 executed_tools.add(self._tool_signature(tool_call))
                 result.tool_calls.append(tool_call)
@@ -181,21 +209,28 @@ class AgentLoop:
                 normalized_name = str(tool_call.get("name", "")).replace(".", "_")
                 if tool_result.get("ok") and normalized_name in MUTATING_TOOLS:
                     mutation_without_validation = True
+                    self._collect_mutated_path(tool_result, mutated_paths)
                 if normalized_name in VALIDATION_TOOLS:
                     mutation_without_validation = False
-            if (
-                mutation_without_validation
-                and self.auto_test_after_edit
-                and self.registry.has_tool("run_test")
-            ):
-                test_call, test_result = await self._run_auto_test()
-                result.tool_calls.append(test_call)
-                current_messages.extend(
-                    [
-                        self._tool_call_items([test_call], [])[0],
-                        self._tool_result_message(test_call, test_result),
-                    ]
-                )
+            if mutation_without_validation:
+                verification_items = await self._run_auto_verification(mutated_paths)
+                for verification_call, verification_result in verification_items:
+                    result.tool_calls.append(verification_call)
+                    current_messages.extend(
+                        [
+                            self._tool_call_items([verification_call], [])[0],
+                            self._tool_result_message(verification_call, verification_result),
+                        ]
+                    )
+            await self.event_bus.emit(
+                EventType.AGENT_ROUND_END,
+                {
+                    "round": round_index + 1,
+                    "tool_calls": len(new_tool_calls),
+                    "mutated_paths": sorted(mutated_paths),
+                },
+                source="agent_loop",
+            )
             current_messages.append(
                 {
                     "role": "user",
@@ -205,20 +240,55 @@ class AgentLoop:
 
         return result
 
-    async def _run_auto_test(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        self._auto_test_counter += 1
+    async def _run_auto_verification(
+        self,
+        mutated_paths: set[str],
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        verification_items: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        if self.auto_compile_after_edit and self.registry.has_tool("bash"):
+            compile_command = self._python_compile_command(mutated_paths)
+            if compile_command:
+                verification_items.append(
+                    await self._run_automatic_tool(
+                        "bash",
+                        {"command": compile_command},
+                        "auto-py-compile-after-edit",
+                    )
+                )
+        if self.auto_test_after_edit and self.registry.has_tool("run_test"):
+            verification_items.append(
+                await self._run_automatic_tool(
+                    "run_test",
+                    {"command": self.auto_test_command},
+                    "auto-test-after-edit",
+                )
+            )
+        return verification_items
+
+    async def _run_automatic_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        call_prefix: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if name == "run_test":
+            self._auto_test_counter += 1
+            counter = self._auto_test_counter
+        else:
+            self._auto_compile_counter += 1
+            counter = self._auto_compile_counter
         tool_call = {
             "type": "function_call",
-            "call_id": f"auto-test-after-edit-{self._auto_test_counter}",
-            "name": "run_test",
-            "arguments": json.dumps({"command": self.auto_test_command}),
+            "call_id": f"{call_prefix}-{counter}",
+            "name": name,
+            "arguments": json.dumps(arguments),
         }
         await self.event_bus.emit(
             EventType.STREAM_TOOL_CALL,
             {"tool_call": tool_call, "automatic": True},
             source="agent_loop",
         )
-        tool_result = await self.registry.dispatch("run_test", {"command": self.auto_test_command})
+        tool_result = await self.registry.dispatch(name, arguments)
         await self.event_bus.emit(
             EventType.STREAM_TOOL_RESULT,
             {
@@ -230,6 +300,24 @@ class AgentLoop:
             source="agent_loop",
         )
         return tool_call, tool_result
+
+    def _collect_mutated_path(self, tool_result: dict[str, Any], mutated_paths: set[str]) -> None:
+        if tool_result.get("deleted"):
+            return
+        path = tool_result.get("path")
+        if isinstance(path, str) and path:
+            mutated_paths.add(path)
+
+    def _python_compile_command(self, mutated_paths: set[str]) -> str | None:
+        python_paths = sorted(
+            path
+            for path in mutated_paths
+            if PurePosixPath(path).suffix.lower() in PYTHON_SUFFIXES
+        )
+        if not python_paths:
+            return None
+        quoted_paths = " ".join(shlex.quote(f"./{path}") for path in python_paths)
+        return f"python -m py_compile {quoted_paths}"
 
     def _tool_result_message(
         self,
@@ -276,8 +364,17 @@ class AgentLoop:
         return name, json.dumps(parsed, sort_keys=True, ensure_ascii=False)
 
     def _tool_result_summary(self, tool_result: dict[str, Any]) -> str:
+        if "summary" in tool_result and isinstance(tool_result["summary"], dict):
+            summary = tool_result["summary"]
+            if summary.get("status"):
+                return str(summary["status"])
         if not tool_result.get("ok"):
-            return str(tool_result.get("error", "tool failed"))
+            if tool_result.get("error"):
+                return str(tool_result["error"])
+            output = str(tool_result.get("stderr") or tool_result.get("stdout") or "").strip()
+            if output:
+                return output.splitlines()[-1][:240]
+            return "tool failed"
         if "files" in tool_result:
             return f"{tool_result.get('count', len(tool_result.get('files', [])))} files"
         if "matches" in tool_result:

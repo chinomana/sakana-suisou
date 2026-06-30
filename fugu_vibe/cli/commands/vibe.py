@@ -51,9 +51,14 @@ console = Console()
 
 CODING_AGENT_INSTRUCTIONS = """You are operating inside fugu-vibe as a controlled coding agent.
 Use structured tools to inspect, modify, run, and verify workspace changes. Available automatic tools include file_list, file_glob, file_read, file_search, file_grep, file_edit, file_delete, file_mkdir, file_write, bash, run_test, run_lint, git_status, git_diff, git_log, and git_show.
-Prefer file_edit for local edits instead of full-file rewrites. Keep all writes inside the selected workspace.
-After changing files, verify with run_test/run_lint or explain why verification was not run, then summarize exactly what changed.
-If direct writes are not safe or fail, produce a git apply compatible unified diff as a fallback.
+Tool-use rules:
+- If the user asks you to inspect files, call file_read/file_search/file_grep instead of guessing.
+- If the user asks you to modify code, call file_edit or file_write. Do not print a patch or diff as the primary way to make changes.
+- Prefer file_edit for local edits instead of full-file rewrites. Keep all writes inside the selected workspace.
+- After changing files, verify with run_test/run_lint/bash as appropriate. Automatic compile/test checks may also run; use their results to fix mistakes before finalizing.
+- If verification fails, inspect the error, edit again, and re-run verification instead of declaring success.
+- Final answers should summarize changed files and verification results. Do not include full diffs unless explicitly requested.
+Only produce a git apply compatible unified diff if tool calls are unavailable or direct writes fail.
 Avoid repeatedly calling the same tool with the same arguments.
 """
 
@@ -360,6 +365,7 @@ async def _send_to_fugu(
             max_tool_rounds=config.tools.max_tool_rounds,
             auto_test_after_edit=config.tools.auto_test_after_edit,
             auto_test_command=config.tools.auto_test_command,
+            auto_compile_after_edit=config.tools.auto_compile_after_edit,
         )
         result = await agent_loop.run(
             messages=messages,
@@ -392,6 +398,11 @@ async def _send_to_fugu(
                     PatchTool(Path.cwd()).check(
                         captured_patch.latest_path.read_text(encoding="utf-8")
                     )
+                    if not tool_calls:
+                        console.print(
+                            "\n[yellow]The model produced a patch instead of using file tools.[/yellow] "
+                            "[dim]Use /apply to review it, or retry with: make the change using file_edit/file_write.[/dim]"
+                        )
                     console.print(
                         f"\n[green]Saved proposed patch:[/green] {captured_patch.latest_path}\n"
                         f"[dim]Review/apply with: /apply {captured_patch.latest_path}[/dim]"

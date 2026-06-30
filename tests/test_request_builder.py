@@ -45,6 +45,31 @@ class TestFuguRequestBuilder:
         assert body["tools"] == [{"type": "web_search"}]
         assert body["tool_choice"] == "auto"
 
+    def test_function_tools_are_serialized_for_responses_api(self):
+        builder = FuguRequestBuilder()
+        file_edit = {
+            "type": "function",
+            "name": "file_edit",
+            "description": "Edit a file",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        run_test = {
+            "type": "function",
+            "name": "run_test",
+            "description": "Run tests",
+            "parameters": {"type": "object", "properties": {}},
+        }
+
+        body = builder.build(
+            messages=[{"role": "user", "content": "change code"}],
+            model="fugu",
+            tools=[file_edit, run_test],
+        )
+
+        assert body["tool_choice"] == "auto"
+        assert body["tools"] == [file_edit, run_test]
+        assert {tool["name"] for tool in body["tools"]} == {"file_edit", "run_test"}
+
     def test_unlimited_mode(self):
         builder = FuguRequestBuilder()
         body = builder.build(

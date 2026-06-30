@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,7 @@ import pytest
 from fugu_vibe.agent.loop import DEFAULT_MAX_TOOL_ROUNDS, AgentLoop
 from fugu_vibe.agent.registry import ToolRegistry
 from fugu_vibe.api.stream_parser import StreamChunk
-from fugu_vibe.core.event_bus import EventBus
+from fugu_vibe.core.event_bus import EventBus, EventType
 from fugu_vibe.tools import FileTools, TerminalTool
 
 
@@ -20,7 +22,7 @@ class SequencedClient:
         self.calls: list[dict[str, Any]] = []
 
     async def send(self, **kwargs: Any):
-        self.calls.append(kwargs)
+        self.calls.append(copy.deepcopy(kwargs))
         chunks = (
             self.chunks_by_call.pop(0)
             if self.chunks_by_call
@@ -28,7 +30,6 @@ class SequencedClient:
         )
         for chunk in chunks:
             yield chunk
-
 
 @pytest.mark.asyncio
 async def test_agent_loop_allows_medium_tasks_by_default(tmp_path: Path) -> None:
@@ -38,7 +39,6 @@ async def test_agent_loop_allows_medium_tasks_by_default(tmp_path: Path) -> None
 
     assert DEFAULT_MAX_TOOL_ROUNDS == 10
     assert loop.max_tool_rounds == 10
-
 
 @pytest.mark.asyncio
 async def test_agent_loop_auto_runs_tests_after_file_edit(tmp_path: Path) -> None:
@@ -67,6 +67,88 @@ async def test_agent_loop_auto_runs_tests_after_file_edit(tmp_path: Path) -> Non
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello\n"
     assert [call["name"] for call in result.tool_calls] == ["file_write", "run_test"]
     assert result.content == "finished"
+    assert {schema["name"] for schema in client.calls[0]["tools"]} >= {
+        "file_write",
+        "file_edit",
+        "run_test",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_auto_compiles_python_edits_and_repairs(tmp_path: Path) -> None:
+    tool_calls = [
+        {
+            "call_id": "call-1",
+            "name": "file_write",
+            "arguments": '{"path":"game.py","content":"def broken():\\n"}',
+        },
+        {
+            "call_id": "call-2",
+            "name": "file_edit",
+            "arguments": '{"path":"game.py","old_string":"def broken():\\n","new_string":"def broken():\\n    pass\\n"}',
+        },
+    ]
+    client = SequencedClient(
+        [
+            [StreamChunk(type="tool_call", tool_call=tool_calls[0])],
+            [StreamChunk(type="tool_call", tool_call=tool_calls[1])],
+            [StreamChunk(type="content", content="fixed")],
+        ]
+    )
+    registry = ToolRegistry(
+        FileTools(tmp_path, safety_mode="auto-edit"),
+        terminal_tool=TerminalTool(
+            tmp_path, enabled=True, safety_mode="auto-safe", timeout_seconds=10
+        ),
+    )
+    loop = AgentLoop(client, registry, EventBus(), auto_test_after_edit=False)
+
+    result = await loop.run([{"role": "user", "content": "write python"}], "model", "high")
+
+    assert (tmp_path / "game.py").read_text(encoding="utf-8") == "def broken():\n    pass\n"
+    assert [call["name"] for call in result.tool_calls] == [
+        "file_write",
+        "bash",
+        "file_edit",
+        "bash",
+    ]
+    assert result.tool_calls[1]["arguments"] == '{"command": "python -m py_compile ./game.py"}'
+    assert "IndentationError" in client.calls[1]["messages"][-2]["output"]
+    assert result.content == "fixed"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_emits_lifecycle_events(tmp_path: Path) -> None:
+    tool_call = {
+        "call_id": "call-1",
+        "name": "file_write",
+        "arguments": '{"path":"notes.txt","content":"hello\\n"}',
+    }
+    client = SequencedClient(
+        [
+            [StreamChunk(type="tool_call", tool_call=tool_call)],
+            [StreamChunk(type="content", content="done")],
+        ]
+    )
+    registry = ToolRegistry(FileTools(tmp_path, safety_mode="auto-edit"))
+    event_bus = EventBus()
+    await event_bus.start()
+    seen: list[str] = []
+    for event_type in EventType:
+        event_bus.on(event_type, lambda event: seen.append(event.type.value))
+    try:
+        loop = AgentLoop(client, registry, event_bus, auto_test_after_edit=False)
+        await loop.run([{"role": "user", "content": "write"}], "model", "high")
+        await asyncio.sleep(0.05)
+    finally:
+        await event_bus.close()
+
+    assert "agent:round_start" in seen
+    assert "agent:round_end" in seen
+    assert "agent:done" in seen
+    assert "stream:tool_call" in seen
+    assert "stream:tool_result" in seen
+
 
 
 @pytest.mark.asyncio

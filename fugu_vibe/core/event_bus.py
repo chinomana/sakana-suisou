@@ -25,6 +25,12 @@ class EventType(Enum):
     ORCH_DONE = "orchestration:done"
     ORCH_ERROR = "orchestration:error"
 
+    # Agent loop events
+    AGENT_ROUND_START = "agent:round_start"
+    AGENT_ROUND_END = "agent:round_end"
+    AGENT_DONE = "agent:done"
+    AGENT_STOPPED = "agent:stopped"
+
     # Stream events
     STREAM_CONTENT = "stream:content"
     STREAM_REASONING = "stream:reasoning"

@@ -20,6 +20,7 @@ from fugu_vibe.tools import FileTools, GitTools, TerminalTool
 
 DEFAULT_HEADLESS_INSTRUCTIONS = """You are running in fugu-vibe headless mode.
 Use structured workspace tools when needed, verify changes when practical, and finish with a concise result summary.
+If changes are needed, call file_edit or file_write instead of printing patches. After edits, use compile/test/lint results to repair failures before finalizing. Only output a diff when tool calls are unavailable or writes fail.
 """
 
 
@@ -88,6 +89,7 @@ async def run_headless(
             max_tool_rounds=config.tools.max_tool_rounds,
             auto_test_after_edit=config.tools.auto_test_after_edit,
             auto_test_command=config.tools.auto_test_command,
+            auto_compile_after_edit=config.tools.auto_compile_after_edit,
         )
         result = await loop.run(
             messages=[{"role": "user", "content": prompt}],

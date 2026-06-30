@@ -154,12 +154,15 @@ class FuguClient:
 
         endpoint = self.RESPONSES_ENDPOINT  # Preferred API
 
+        tool_names = [str(tool.get("name") or tool.get("type", "")) for tool in tools or []]
         logger.info(
             "fugu_request",
             model=model,
             effort=effort,
             message_count=len(messages),
             web_search=web_search,
+            tool_count=len(tool_names),
+            tool_names=tool_names,
         )
 
         start_time = time.monotonic()

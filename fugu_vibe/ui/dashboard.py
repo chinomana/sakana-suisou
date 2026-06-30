@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from fugu_vibe.core.event_bus import Event, EventBus, EventType
@@ -63,6 +64,15 @@ class OrchestrationDashboard:
         self._max_content_lines = 50
         self._routing_confidence: float | None = None
         self._last_budget_alert: dict | None = None
+        self._agent_status = "idle"
+        self._agent_round = 0
+        self._agent_max_rounds = 0
+        self._tools_enabled = False
+        self._tool_count = 0
+        self._current_tool = ""
+        self._last_tool_status = ""
+        self._last_tool_summary = ""
+        self._last_mutated_paths: list[str] = []
         self._running = False
         self._live: Live | None = None
         self._update_task: asyncio.Task | None = None
@@ -93,8 +103,9 @@ class OrchestrationDashboard:
             Layout(name="tokens", ratio=1),
         )
 
-        # Right: content + tasks
+        # Right: agent state + content + tasks
         layout["right"].split_column(
+            Layout(name="agent", size=8),
             Layout(name="content", ratio=3),
             Layout(name="tasks", ratio=1),
         )
@@ -110,6 +121,10 @@ class OrchestrationDashboard:
         self.event_bus.on(EventType.ORCH_WORKER, self._on_worker)
         self.event_bus.on(EventType.ORCH_VERIFY, self._on_verify)
         self.event_bus.on(EventType.ORCH_DONE, self._on_done)
+        self.event_bus.on(EventType.AGENT_ROUND_START, self._on_agent_round_start)
+        self.event_bus.on(EventType.AGENT_ROUND_END, self._on_agent_round_end)
+        self.event_bus.on(EventType.AGENT_DONE, self._on_agent_done)
+        self.event_bus.on(EventType.AGENT_STOPPED, self._on_agent_stopped)
         self.event_bus.on(EventType.STREAM_CONTENT, self._on_content)
         self.event_bus.on(EventType.STREAM_REASONING, self._on_reasoning)
         self.event_bus.on(EventType.STREAM_TOOL_CALL, self._on_tool_call)
@@ -176,6 +191,11 @@ class OrchestrationDashboard:
             Panel(self.token_meter.render(), title="💰 Token Usage", border_style="green")
         )
 
+        # Agent state
+        self.layout["agent"].update(
+            Panel(self._render_agent_status(), title="🤖 Agent State", border_style="magenta")
+        )
+
         # Content
         self.layout["content"].update(
             Panel(self._render_content(), title="📝 Output", border_style="blue")
@@ -233,6 +253,31 @@ class OrchestrationDashboard:
                 content.append("\n")
         return content
 
+    def _render_agent_status(self) -> Table:
+        """Render current local agent/tool execution status."""
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("Field", style="bold")
+        table.add_column("Value")
+        status_style = {
+            "idle": "dim",
+            "thinking": "yellow",
+            "tool:file_write": "cyan",
+            "tool:file_edit": "cyan",
+            "testing": "magenta",
+            "verifying": "magenta",
+            "tool_error": "red",
+            "done": "green",
+            "stopped": "red",
+        }.get(self._agent_status, "white")
+        table.add_row("Status", Text(self._agent_status, style=status_style))
+        round_value = f"{self._agent_round}/{self._agent_max_rounds}" if self._agent_max_rounds else "-"
+        table.add_row("Round", round_value)
+        table.add_row("Tools", f"{self._tool_count} {'enabled' if self._tools_enabled else 'disabled'}")
+        table.add_row("Current tool", self._current_tool or "-")
+        table.add_row("Last result", f"{self._last_tool_status} {self._last_tool_summary}".strip() or "-")
+        table.add_row("Changed", ", ".join(self._last_mutated_paths[-3:]) or "-")
+        return table
+
     def _render_footer(self) -> Text:
         """Render status footer."""
         footer = Text()
@@ -254,6 +299,32 @@ class OrchestrationDashboard:
         model = event.data.get("model", "unknown")
         message = event.data.get("message") or f"Routing: {model}"
         self.timeline.add_event("🧭", message, "cyan")
+
+    def _on_agent_round_start(self, event: Event) -> None:
+        self._agent_status = "thinking"
+        self._agent_round = int(event.data.get("round", self._agent_round) or 0)
+        self._agent_max_rounds = int(event.data.get("max_rounds", self._agent_max_rounds) or 0)
+        self._tools_enabled = bool(event.data.get("tools_enabled"))
+        self._tool_count = int(event.data.get("tool_count", self._tool_count) or 0)
+        self._current_tool = ""
+        self.timeline.add_event("🤖", f"Agent round {self._agent_round} started", "cyan")
+
+    def _on_agent_round_end(self, event: Event) -> None:
+        self._agent_status = "thinking"
+        paths = event.data.get("mutated_paths")
+        if isinstance(paths, list):
+            self._last_mutated_paths = [str(path) for path in paths]
+        self.timeline.add_event("↩", f"Agent round {event.data.get('round', '?')} complete", "cyan")
+
+    def _on_agent_done(self, event: Event) -> None:
+        self._agent_status = "done"
+        self._current_tool = ""
+        self.timeline.add_event("✅", "Agent completed", "green")
+
+    def _on_agent_stopped(self, event: Event) -> None:
+        self._agent_status = "stopped"
+        reason = event.data.get("reason", "stopped")
+        self.timeline.add_event("🛑", f"Agent stopped: {reason}", "red")
 
     def _on_worker(self, event: Event) -> None:
         self._orch_state.phase = OrchestrationPhase.WORKER_ACTIVE
@@ -285,14 +356,29 @@ class OrchestrationDashboard:
     def _on_tool_call(self, event: Event) -> None:
         tool_call = event.data.get("tool_call", {})
         name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else "unknown"
-        self._stream_content.append(f"[tool] {name}")
+        automatic = " auto" if event.data.get("automatic") else ""
+        self._current_tool = str(name)
+        self._agent_status = self._status_for_tool(str(name))
+        self._stream_content.append(f"[tool{automatic}] {name}")
 
     def _on_tool_result(self, event: Event) -> None:
         tool_call = event.data.get("tool_call", {})
         name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else "unknown"
         status = "ok" if event.data.get("ok") else "error"
         summary = event.data.get("summary", "")
+        self._last_tool_status = status
+        self._last_tool_summary = str(summary)
+        self._current_tool = ""
+        self._agent_status = "thinking" if status == "ok" else "tool_error"
         self._stream_content.append(f"[tool:{status}] {name} {summary}".rstrip())
+
+    def _status_for_tool(self, name: str) -> str:
+        if name in {"run_test", "run_lint"}:
+            return "testing"
+        if name == "bash":
+            return "verifying"
+        return f"tool:{name}"
+
 
     def _on_stream_token_usage(self, event: Event) -> None:
         self._update_token_meter(event.data)
