@@ -15,6 +15,7 @@ from fugu_vibe.core.effort import select_effort
 from fugu_vibe.core.event_bus import EventBus
 from fugu_vibe.core.event_log import EventLogWriter
 from fugu_vibe.core.instructions import build_instructions
+from fugu_vibe.core.orchestration import OrchestrationAnalyzer
 from fugu_vibe.mcp import MCPConfigStore, MCPToolManager
 from fugu_vibe.tools import FileTools, GitTools, TerminalTool
 
@@ -82,6 +83,7 @@ async def run_headless(
             workspace_path,
         )
         response_parts: list[str] = []
+        analyzer = OrchestrationAnalyzer(config, event_bus)
         loop = AgentLoop(
             fugu_client,
             registry,
@@ -99,7 +101,9 @@ async def run_headless(
             instructions=final_instructions,
             max_output_tokens=min(config.model.max_output_tokens, 4096),
             on_content=response_parts.append,
+            on_chunk=analyzer.analyze_chunk,
         )
+        await analyzer.finalize()
         content = "".join(response_parts) or result.content
         return HeadlessResult(
             content=content,

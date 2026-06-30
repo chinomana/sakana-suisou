@@ -31,6 +31,10 @@ from git.exc import GitCommandError
 from fugu_vibe.core.attachments import build_content_parts
 from fugu_vibe.core.event_bus import EventBus, EventType
 
+TASK_AGENT_INSTRUCTIONS = """You are running as an unattended fugu-vibe task inside an isolated workspace.
+Use structured workspace tools for code inspection and edits. Do not print patches when file_edit or file_write can apply the change directly. After edits, use compile/test/lint results to repair failures before finalizing with a concise summary.
+"""
+
 if TYPE_CHECKING:
     from fugu_vibe.api.client import FuguClient
     from fugu_vibe.config import Config
@@ -145,6 +149,7 @@ class TaskManager:
         # Concurrency control
         self._semaphore: asyncio.Semaphore | None = None
         self._running_tasks: dict[str, asyncio.Task] = {}
+        self._active_task_ids: set[str] = set()
         self._queue: asyncio.Queue[str] = asyncio.Queue()
 
         # Git
@@ -277,10 +282,11 @@ class TaskManager:
                 return {"error": f"Task {task_id} not found"}
             return self._task_to_dict(task)
 
+        scheduled_waiting = max(0, len(self._running_tasks) - len(self._active_task_ids))
         return {
             "tasks": [self._task_to_dict(t) for t in self._tasks.values()],
-            "running": len(self._running_tasks),
-            "queued": self._queue.qsize(),
+            "running": len(self._active_task_ids),
+            "queued": self._queue.qsize() + scheduled_waiting,
             "max_parallel": self.task_config.max_parallel,
         }
 
@@ -458,12 +464,10 @@ class TaskManager:
             try:
                 task_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
 
-                # Acquire semaphore slot
-                async with self._semaphore:
-                    if task_id in self._tasks and not self._tasks[task_id].is_terminal:
-                        self._running_tasks[task_id] = asyncio.create_task(
-                            self._execute_task(task_id)
-                        )
+                if task_id in self._tasks and not self._tasks[task_id].is_terminal:
+                    self._running_tasks[task_id] = asyncio.create_task(
+                        self._execute_task_with_slot(task_id)
+                    )
 
             except TimeoutError:
                 continue
@@ -471,6 +475,19 @@ class TaskManager:
                 break
             except Exception:
                 logger.exception("scheduler_error")
+
+
+    async def _execute_task_with_slot(self, task_id: str) -> None:
+        """Execute a queued task while holding a concurrency slot."""
+        if self._semaphore is None:
+            await self._execute_task(task_id)
+            return
+        async with self._semaphore:
+            self._active_task_ids.add(task_id)
+            try:
+                await self._execute_task(task_id)
+            finally:
+                self._active_task_ids.discard(task_id)
 
     async def _execute_task(self, task_id: str) -> None:
         """Execute a single Fugu task."""
@@ -482,59 +499,97 @@ class TaskManager:
         await self._emit(EventType.TASK_STARTED, {"task_id": task_id})
 
         try:
-            # Create worktree
             task.worktree_path = self._create_worktree(task)
-
-            # Build messages
+            workspace = Path(task.worktree_path)
             attachment_paths = [Path(file_path) for file_path in task.files]
             content = build_content_parts(task.prompt, attachment_paths) if attachment_paths else task.prompt
             messages = [{"role": "user", "content": content}]
+            from fugu_vibe.agent.loop import AgentLoop
+            from fugu_vibe.core.headless import build_headless_registry
+            from fugu_vibe.core.instructions import build_instructions
+            from fugu_vibe.core.orchestration import OrchestrationAnalyzer
 
-            # Execute via Fugu client
-            output_parts = []
-            async for chunk in self.client.send(
+            output_parts: list[str] = []
+
+            def on_content(content_piece: str) -> None:
+                if not content_piece:
+                    return
+                output_parts.append(content_piece)
+                self._append_task_output(task, content_piece)
+                if self.event_bus:
+                    asyncio.create_task(
+                        self._emit(
+                            EventType.STREAM_CONTENT,
+                            {"task_id": task_id, "content": content_piece},
+                        )
+                    )
+                    asyncio.create_task(
+                        self._emit(
+                            EventType.TASK_PROGRESS,
+                            {"task_id": task_id, "output_length": len("".join(output_parts))},
+                        )
+                    )
+
+            registry = build_headless_registry(self.config, workspace)
+            analyzer = OrchestrationAnalyzer(self.config, self.event_bus)
+            loop = AgentLoop(
+                self.client,
+                registry,
+                self.event_bus or EventBus(),
+                max_tool_rounds=self.config.tools.max_tool_rounds,
+                auto_test_after_edit=self.config.tools.auto_test_after_edit,
+                auto_test_command=self.config.tools.auto_test_command,
+                auto_compile_after_edit=self.config.tools.auto_compile_after_edit,
+            )
+            result = await loop.run(
                 messages=messages,
                 model=task.model,
-                effort=task.effort,  # type: ignore
+                effort=task.effort,  # type: ignore[arg-type]
                 web_search=task.web_search,
-            ):
-                if chunk.type == "content":
-                    output_parts.append(chunk.content)
-                    self._append_task_output(task, chunk.content)
-                    await self._emit(
-                        EventType.STREAM_CONTENT,
-                        {"task_id": task_id, "content": chunk.content},
-                    )
-                elif chunk.type == "token_usage":
-                    task.token_usage = {
-                        "input": chunk.token_usage.input_tokens,
-                        "output": chunk.token_usage.output_tokens,
-                        "orchestration": chunk.token_usage.orchestration_tokens,
-                    }
+                instructions=build_instructions(TASK_AGENT_INSTRUCTIONS, workspace),
+                max_output_tokens=min(self.config.model.max_output_tokens, 4096),
+                on_content=on_content,
+                on_chunk=analyzer.analyze_chunk,
+            )
+            await analyzer.finalize()
 
-                # Emit progress
-                await self._emit(
-                    EventType.TASK_PROGRESS,
-                    {"task_id": task_id, "output_length": len("".join(output_parts))},
-                )
-
-            task.output = "".join(output_parts)
+            task.output = "".join(output_parts) or result.content
+            task.token_usage = {
+                "input": analyzer.state.token_usage.input_tokens,
+                "output": analyzer.state.token_usage.output_tokens,
+                "orchestration": analyzer.state.token_usage.orchestration_tokens,
+                "total": analyzer.state.token_usage.total_tokens,
+            }
+            task.metadata.update(
+                {
+                    "rounds": result.rounds,
+                    "tool_calls": result.tool_calls,
+                    "tool_call_count": len(result.tool_calls),
+                    "orchestration": {
+                        "workers": len(analyzer.state.workers),
+                        "verifications": analyzer.state.verification_count,
+                        "routing_confidence": analyzer.state.routing_confidence,
+                    },
+                }
+            )
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
             self._persist_task(task)
 
-            # Auto-merge if enabled
             if self.task_config.auto_merge:
                 self._merge_worktree(task)
                 self._persist_task(task)
 
-            await self._emit(EventType.TASK_COMPLETED, {
-                "task_id": task_id,
-                "duration": task.duration,
-                "tokens": task.token_usage,
-            })
-
-            # Wake up dependent tasks
+            await self._emit(
+                EventType.TASK_COMPLETED,
+                {
+                    "task_id": task_id,
+                    "duration": task.duration,
+                    "tokens": task.token_usage,
+                    "rounds": result.rounds,
+                    "tool_calls": len(result.tool_calls),
+                },
+            )
             await self._wake_dependents(task_id)
 
         except asyncio.CancelledError:
@@ -549,6 +604,7 @@ class TaskManager:
             logger.error("task_failed", task_id=task_id, error=str(e))
         finally:
             self._running_tasks.pop(task_id, None)
+            self._active_task_ids.discard(task_id)
 
     async def _wake_dependents(self, completed_task_id: str) -> None:
         """Check and queue tasks that were waiting on the completed task."""

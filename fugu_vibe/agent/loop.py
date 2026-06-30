@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import shlex
 from collections.abc import Callable
@@ -9,8 +10,12 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
+import structlog
+
 from fugu_vibe.agent.registry import ToolRegistry
 from fugu_vibe.core.event_bus import EventBus, EventType
+
+logger = structlog.get_logger()
 
 
 class StreamingClient(Protocol):
@@ -57,6 +62,7 @@ class AgentLoop:
         max_output_tokens: int | None = None,
         on_content: Callable[[str], None] | None = None,
         on_tool_call: Callable[[dict[str, Any]], None] | None = None,
+        on_chunk: Callable[[Any], Any] | None = None,
     ) -> AgentLoopResult:
         result = AgentLoopResult()
         current_messages = list(messages)
@@ -98,6 +104,13 @@ class AgentLoop:
                 instructions=instructions,
                 max_output_tokens=max_output_tokens,
             ):
+                if on_chunk:
+                    try:
+                        observer_result = on_chunk(chunk)
+                        if inspect.isawaitable(observer_result):
+                            await observer_result
+                    except Exception as e:
+                        logger.warning("chunk_observer_failed", chunk_type=chunk.type, error=str(e))
                 if chunk.type == "content":
                     content_parts.append(chunk.content)
                     await self.event_bus.emit(

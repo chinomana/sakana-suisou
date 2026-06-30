@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from fugu_vibe.api.stream_parser import StreamChunk
 from fugu_vibe.config import Config
+from fugu_vibe.core import task_manager as task_manager_module
 from fugu_vibe.core.event_bus import EventBus, EventType
 from fugu_vibe.core.task_manager import TaskManager, TaskStatus
 
 
 class FakeClient:
     pass
+
+
+class SequencedClient:
+    def __init__(self, chunks_by_call: list[list[StreamChunk]]):
+        self.chunks_by_call = chunks_by_call
+        self.calls: list[dict[str, Any]] = []
+
+    async def send(self, **kwargs: Any):
+        self.calls.append(kwargs)
+        chunks = self.chunks_by_call.pop(0) if self.chunks_by_call else []
+        for chunk in chunks:
+            yield chunk
 
 
 @pytest.fixture
@@ -103,3 +119,77 @@ async def test_task_manager_scheduled_recovery_requeues_running_task(
     assert reloaded._tasks[task.task_id].status == TaskStatus.QUEUED
     assert reloaded._queue.qsize() == 1
     await reloaded.close()
+
+
+@pytest.mark.asyncio
+async def test_task_manager_executes_tasks_with_agent_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config.tools.auto_test_after_edit = False
+    config.tools.auto_compile_after_edit = False
+    config.safety.mode = "auto-edit"
+
+    tool_call = {
+        "call_id": "call-1",
+        "name": "file_write",
+        "arguments": '{"path":"notes.txt","content":"hello from task\\n"}',
+    }
+    client = SequencedClient(
+        [
+            [StreamChunk(type="tool_call", tool_call=tool_call)],
+            [StreamChunk(type="content", content="done")],
+        ]
+    )
+    manager = TaskManager(config, client, EventBus(), run_scheduler=False)
+    await manager.start()
+    task = await manager.submit("write file", prompt="write notes")
+
+    await manager._execute_task(task.task_id)
+
+    worktree = Path(manager._tasks[task.task_id].worktree_path)
+    assert (worktree / "notes.txt").read_text(encoding="utf-8") == "hello from task\n"
+    assert manager._tasks[task.task_id].status == TaskStatus.COMPLETED
+    assert manager._tasks[task.task_id].metadata["tool_call_count"] == 1
+    assert client.calls[0]["tools"]
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_task_manager_scheduler_respects_max_parallel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config.tasks.max_parallel = 1
+    started: list[str] = []
+    release = asyncio.Event()
+
+    async def fake_execute(self: TaskManager, task_id: str) -> None:
+        self._tasks[task_id].status = TaskStatus.RUNNING
+        started.append(task_id)
+        await release.wait()
+        self._tasks[task_id].status = TaskStatus.COMPLETED
+
+    monkeypatch.setattr(task_manager_module.TaskManager, "_execute_task", fake_execute)
+    manager = TaskManager(config, FakeClient(), EventBus(), run_scheduler=False)
+    await manager.start()
+    first = await manager.submit("one", prompt="one")
+    second = await manager.submit("two", prompt="two")
+
+    first_runner = asyncio.create_task(manager._execute_task_with_slot(first.task_id))
+    second_runner = asyncio.create_task(manager._execute_task_with_slot(second.task_id))
+    await asyncio.sleep(0.05)
+
+    assert started == [first.task_id]
+    assert manager._active_task_ids == {first.task_id}
+
+    release.set()
+    await asyncio.gather(first_runner, second_runner)
+
+    assert started == [first.task_id, second.task_id]
+    assert manager._active_task_ids == set()
+    await manager.close()

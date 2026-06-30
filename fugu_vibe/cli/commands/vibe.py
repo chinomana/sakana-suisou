@@ -376,6 +376,7 @@ async def _send_to_fugu(
             max_output_tokens=min(config.model.max_output_tokens, 4096),
             on_content=on_content,
             on_tool_call=on_tool_call,
+            on_chunk=analyzer.analyze_chunk,
         )
         if result.tool_calls:
             context.record_tool_usage(

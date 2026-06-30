@@ -149,6 +149,52 @@ async def test_agent_loop_emits_lifecycle_events(tmp_path: Path) -> None:
     assert "stream:tool_call" in seen
     assert "stream:tool_result" in seen
 
+@pytest.mark.asyncio
+async def test_agent_loop_passes_chunks_to_observer(tmp_path: Path) -> None:
+    chunks = [
+        StreamChunk(type="content", content="hello", elapsed_time=6.0),
+        StreamChunk(type="token_usage"),
+    ]
+    client = SequencedClient([chunks])
+    registry = ToolRegistry(FileTools(tmp_path))
+    seen: list[str] = []
+
+    async def observe(chunk: StreamChunk) -> None:
+        seen.append(chunk.type)
+
+    loop = AgentLoop(client, registry, EventBus())
+    result = await loop.run(
+        [{"role": "user", "content": "say hello"}],
+        "model",
+        "high",
+        on_chunk=observe,
+    )
+
+    assert result.content == "hello"
+    assert seen == ["content", "token_usage"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_ignores_chunk_observer_errors(tmp_path: Path) -> None:
+    chunks = [StreamChunk(type="content", content="hello", elapsed_time=6.0)]
+    client = SequencedClient([chunks])
+    registry = ToolRegistry(FileTools(tmp_path))
+
+    def observe(_chunk: StreamChunk) -> None:
+        raise RuntimeError("observer failed")
+
+    loop = AgentLoop(client, registry, EventBus())
+    result = await loop.run(
+        [{"role": "user", "content": "say hello"}],
+        "model",
+        "high",
+        on_chunk=observe,
+    )
+
+    assert result.content == "hello"
+
+
+
 
 
 @pytest.mark.asyncio
