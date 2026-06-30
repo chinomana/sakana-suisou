@@ -125,6 +125,7 @@ class ToolConfig(BaseSettings):
     max_tool_rounds: int = 10
     auto_test_after_edit: bool = True
     auto_test_command: str = "python -m pytest -q"
+    auto_compile_after_edit: bool = True
 
 
 class MCPConfig(BaseSettings):

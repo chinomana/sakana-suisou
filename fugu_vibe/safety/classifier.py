@@ -66,6 +66,7 @@ SAFE_PATTERNS = tuple(
         r"^git\s+log(?:\s|$)",
         r"^git\s+show(?:\s|$)",
         r"^python\s+-m\s+pytest(?:\s|$)",
+        r"^python\s+-m\s+py_compile(?:\s|$)",
         r"^pytest(?:\s|$)",
         r"^ruff\s+check(?:\s|$)",
         r"^mypy(?:\s|$)",

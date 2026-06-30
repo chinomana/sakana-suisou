@@ -323,6 +323,7 @@ unlimited_mode = false
 max_tool_rounds = 10
 auto_test_after_edit = true
 auto_test_command = "python -m pytest -q"
+auto_compile_after_edit = true
 terminal_enabled = true
 terminal_approval = "ask"
 
