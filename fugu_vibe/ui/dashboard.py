@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from typing import TYPE_CHECKING
 
 import structlog
@@ -70,8 +71,10 @@ class OrchestrationDashboard:
         self._tools_enabled = False
         self._tool_count = 0
         self._current_tool = ""
+        self._current_action = "Waiting for instructions"
         self._last_tool_status = ""
         self._last_tool_summary = ""
+        self._last_result_text = ""
         self._last_mutated_paths: list[str] = []
         self._running = False
         self._live: Live | None = None
@@ -105,7 +108,7 @@ class OrchestrationDashboard:
 
         # Right: agent state + content + tasks
         layout["right"].split_column(
-            Layout(name="agent", size=8),
+            Layout(name="agent", size=9),
             Layout(name="content", ratio=3),
             Layout(name="tasks", ratio=1),
         )
@@ -258,23 +261,15 @@ class OrchestrationDashboard:
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_column("Field", style="bold")
         table.add_column("Value")
-        status_style = {
-            "idle": "dim",
-            "thinking": "yellow",
-            "tool:file_write": "cyan",
-            "tool:file_edit": "cyan",
-            "testing": "magenta",
-            "verifying": "magenta",
-            "tool_error": "red",
-            "done": "green",
-            "stopped": "red",
-        }.get(self._agent_status, "white")
-        table.add_row("Status", Text(self._agent_status, style=status_style))
+        status_label = self._display_status_label(self._agent_status)
+        status_style = self._display_status_style(self._agent_status)
+        table.add_row("State", Text(status_label, style=status_style))
+        table.add_row("Now", self._current_action or "-")
         round_value = f"{self._agent_round}/{self._agent_max_rounds}" if self._agent_max_rounds else "-"
         table.add_row("Round", round_value)
-        table.add_row("Tools", f"{self._tool_count} {'enabled' if self._tools_enabled else 'disabled'}")
-        table.add_row("Current tool", self._current_tool or "-")
-        table.add_row("Last result", f"{self._last_tool_status} {self._last_tool_summary}".strip() or "-")
+        table.add_row("Tools", f"{self._tool_count} {'available' if self._tools_enabled else 'disabled'}")
+        table.add_row("Tool", self._current_tool or "-")
+        table.add_row("Last result", self._last_result_text or "-")
         table.add_row("Changed", ", ".join(self._last_mutated_paths[-3:]) or "-")
         return table
 
@@ -307,23 +302,29 @@ class OrchestrationDashboard:
         self._tools_enabled = bool(event.data.get("tools_enabled"))
         self._tool_count = int(event.data.get("tool_count", self._tool_count) or 0)
         self._current_tool = ""
-        self.timeline.add_event("🤖", f"Agent round {self._agent_round} started", "cyan")
+        self._current_action = "Understanding the request and choosing the next step"
+        self.timeline.add_event("🤖", f"Round {self._agent_round}: planning next step", "cyan")
 
     def _on_agent_round_end(self, event: Event) -> None:
         self._agent_status = "thinking"
         paths = event.data.get("mutated_paths")
         if isinstance(paths, list):
             self._last_mutated_paths = [str(path) for path in paths]
-        self.timeline.add_event("↩", f"Agent round {event.data.get('round', '?')} complete", "cyan")
+            if self._last_mutated_paths:
+                self._current_action = "Reviewing tool results before continuing"
+        self.timeline.add_event("↩", f"Round {event.data.get('round', '?')} complete", "cyan")
 
     def _on_agent_done(self, event: Event) -> None:
         self._agent_status = "done"
         self._current_tool = ""
+        self._current_action = "Finished and ready to summarize"
         self.timeline.add_event("✅", "Agent completed", "green")
 
     def _on_agent_stopped(self, event: Event) -> None:
         self._agent_status = "stopped"
+        self._current_tool = ""
         reason = event.data.get("reason", "stopped")
+        self._current_action = f"Stopped: {reason}"
         self.timeline.add_event("🛑", f"Agent stopped: {reason}", "red")
 
     def _on_worker(self, event: Event) -> None:
@@ -356,29 +357,174 @@ class OrchestrationDashboard:
     def _on_tool_call(self, event: Event) -> None:
         tool_call = event.data.get("tool_call", {})
         name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else "unknown"
-        automatic = " auto" if event.data.get("automatic") else ""
+        arguments = self._tool_arguments(tool_call)
+        automatic = bool(event.data.get("automatic"))
         self._current_tool = str(name)
-        self._agent_status = self._status_for_tool(str(name))
-        self._stream_content.append(f"[tool{automatic}] {name}")
+        self._agent_status = self._status_for_tool(str(name), arguments)
+        self._current_action = self._action_for_tool(str(name), arguments, automatic=automatic)
+        marker = "auto-check" if automatic else "tool"
+        self._stream_content.append(f"[{marker}] {self._current_action}")
 
     def _on_tool_result(self, event: Event) -> None:
         tool_call = event.data.get("tool_call", {})
         name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else "unknown"
-        status = "ok" if event.data.get("ok") else "error"
+        arguments = self._tool_arguments(tool_call)
+        ok = bool(event.data.get("ok"))
+        status = "ok" if ok else "error"
         summary = event.data.get("summary", "")
         self._last_tool_status = status
         self._last_tool_summary = str(summary)
+        self._last_result_text = self._result_text(str(name), ok, str(summary), arguments)
         self._current_tool = ""
-        self._agent_status = "thinking" if status == "ok" else "tool_error"
-        self._stream_content.append(f"[tool:{status}] {name} {summary}".rstrip())
+        self._agent_status = "thinking" if ok else "repairing"
+        self._current_action = (
+            "Using the result to decide the next step"
+            if ok
+            else "Validation failed; feeding the error back so the agent can fix it"
+        )
+        self._stream_content.append(f"[{status}] {self._last_result_text}")
 
-    def _status_for_tool(self, name: str) -> str:
-        if name in {"run_test", "run_lint"}:
+    def _tool_arguments(self, tool_call: object) -> dict[str, object]:
+        if not isinstance(tool_call, dict):
+            return {}
+        raw_arguments = tool_call.get("arguments", {})
+        if isinstance(raw_arguments, dict):
+            return raw_arguments
+        if isinstance(raw_arguments, str) and raw_arguments.strip():
+            try:
+                parsed = json.loads(raw_arguments)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    def _status_for_tool(self, name: str, arguments: dict[str, object] | None = None) -> str:
+        arguments = arguments or {}
+        command = str(arguments.get("command", ""))
+        if name in {"file_list", "file_glob", "file_read", "file_search", "file_grep"}:
+            return "inspecting"
+        if name in {"file_write", "file_edit", "file_delete", "file_mkdir"}:
+            return "editing"
+        if name == "run_test" or "pytest" in command:
             return "testing"
+        if name == "run_lint" or "ruff" in command:
+            return "linting"
+        if name == "bash" and "py_compile" in command:
+            return "compiling"
         if name == "bash":
-            return "verifying"
-        return f"tool:{name}"
+            return "running"
+        if name.startswith("git_"):
+            return "reviewing"
+        return "using_tool"
 
+    def _action_for_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        automatic: bool = False,
+    ) -> str:
+        prefix = "Auto-check: " if automatic else ""
+        path = self._argument_text(arguments, "path")
+        command = self._argument_text(arguments, "command")
+        pattern = self._argument_text(arguments, "pattern")
+        query = self._argument_text(arguments, "query")
+        if name == "file_list":
+            return f"{prefix}Listing workspace files"
+        if name == "file_glob":
+            return f"{prefix}Finding files matching {pattern or '**/*'}"
+        if name == "file_read":
+            return f"{prefix}Reading {path or 'a file'}"
+        if name in {"file_search", "file_grep"}:
+            target = query or self._argument_text(arguments, "pattern_regex") or "text"
+            return f"{prefix}Searching for {target}"
+        if name == "file_write":
+            return f"{prefix}Writing {path or 'a file'}"
+        if name == "file_edit":
+            return f"{prefix}Editing {path or 'a file'}"
+        if name == "file_delete":
+            return f"{prefix}Deleting {path or 'a file'}"
+        if name == "file_mkdir":
+            return f"{prefix}Creating directory {path or ''}".strip()
+        if name == "run_test" or "pytest" in command:
+            return f"{prefix}Running tests: {command or 'pytest'}"
+        if name == "run_lint" or "ruff" in command:
+            return f"{prefix}Running lint: {command or 'ruff check .'}"
+        if name == "bash" and "py_compile" in command:
+            return f"{prefix}Checking Python syntax: {command}"
+        if name == "bash":
+            return f"{prefix}Running command: {command or 'shell command'}"
+        if name == "git_status":
+            return f"{prefix}Checking git status"
+        if name == "git_diff":
+            return f"{prefix}Reviewing git diff"
+        return f"{prefix}Using {name}"
+
+    def _result_text(
+        self,
+        name: str,
+        ok: bool,
+        summary: str,
+        arguments: dict[str, object],
+    ) -> str:
+        label = self._result_label(name, arguments)
+        if ok:
+            return f"{label} passed" + (f": {summary}" if summary else "")
+        return f"{label} failed" + (f": {summary}" if summary else "")
+
+    def _result_label(self, name: str, arguments: dict[str, object]) -> str:
+        path = self._argument_text(arguments, "path")
+        command = self._argument_text(arguments, "command")
+        if name in {"file_read", "file_write", "file_edit", "file_delete"}:
+            return path or name
+        if name == "file_mkdir":
+            return f"directory {path}" if path else "directory operation"
+        if name == "run_test" or "pytest" in command:
+            return "Tests"
+        if name == "run_lint" or "ruff" in command:
+            return "Lint"
+        if name == "bash" and "py_compile" in command:
+            return "Python syntax check"
+        if name == "bash":
+            return "Command"
+        if name.startswith("git_"):
+            return "Git check"
+        return name
+
+    def _argument_text(self, arguments: dict[str, object], key: str) -> str:
+        value = arguments.get(key)
+        return str(value) if value is not None else ""
+
+    def _display_status_label(self, status: str) -> str:
+        labels = {
+            "idle": "Waiting",
+            "thinking": "Planning next step",
+            "inspecting": "Inspecting files",
+            "editing": "Editing workspace",
+            "compiling": "Checking syntax",
+            "testing": "Running tests",
+            "linting": "Running lint",
+            "running": "Running command",
+            "reviewing": "Reviewing changes",
+            "using_tool": "Using tool",
+            "repairing": "Fixing a failed check",
+            "done": "Done",
+            "stopped": "Stopped",
+        }
+        return labels.get(status, status)
+
+    def _display_status_style(self, status: str) -> str:
+        if status in {"done"}:
+            return "green"
+        if status in {"repairing", "stopped"}:
+            return "red"
+        if status in {"compiling", "testing", "linting"}:
+            return "magenta"
+        if status in {"inspecting", "editing", "reviewing", "using_tool", "running"}:
+            return "cyan"
+        if status == "thinking":
+            return "yellow"
+        return "dim"
 
     def _on_stream_token_usage(self, event: Event) -> None:
         self._update_token_meter(event.data)
