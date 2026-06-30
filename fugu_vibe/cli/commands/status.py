@@ -98,6 +98,10 @@ def _print_overview(status: dict) -> None:
     summary.add_row("⏳ Pending", str(pending))
     summary.add_row("✅ Completed", str(completed))
     summary.add_row("❌ Failed", str(failed))
+    summary.add_row("🎛️ Active Slots", f"{status.get('running', 0)}/{status.get('max_parallel', '-')}")
+    if status.get("scheduled_waiting"):
+        summary.add_row("🕓 Scheduled Waiting", str(status["scheduled_waiting"]))
+
     summary.add_row("📊 Max Parallel", str(status.get("max_parallel", "-")))
     console.print(summary)
 
@@ -108,6 +112,9 @@ def _print_overview(status: dict) -> None:
         table.add_column("Name")
         table.add_column("Status")
         table.add_column("Model")
+        table.add_column("Rounds", justify="right")
+        table.add_column("Tools", justify="right")
+        table.add_column("Tokens", justify="right")
         table.add_column("Duration")
 
         for task in tasks:
@@ -125,6 +132,9 @@ def _print_overview(status: dict) -> None:
                 task.get("name", ""),
                 f"[{status_color}]{task.get('status', '-')}[/]",
                 task.get("model", ""),
+                str(task.get("rounds") or "-"),
+                str(task.get("tool_call_count") or "-"),
+                _format_tokens(task.get("token_usage", {})),
                 f"{task.get('duration', 0):.1f}s" if task.get("duration") else "-",
             )
 
@@ -148,6 +158,18 @@ def _print_task_detail(task: dict) -> None:
     table.add_row("Model", task.get("model", "-"))
     table.add_row("Effort", task.get("effort", "-"))
     table.add_row("Branch", task.get("branch", "-"))
+    table.add_row("Rounds", str(task.get("rounds") or 0))
+    table.add_row("Tool Calls", str(task.get("tool_call_count") or 0))
+    tokens = task.get("token_usage", {})
+    table.add_row("Tokens", _format_tokens(tokens, detailed=True))
+    orchestration = task.get("orchestration", {})
+    if orchestration:
+        table.add_row("Workers", str(orchestration.get("workers", 0)))
+        table.add_row("Verifications", str(orchestration.get("verifications", 0)))
+        confidence = orchestration.get("routing_confidence")
+        if confidence is not None:
+            table.add_row("Routing Confidence", f"{confidence:.0%}" if isinstance(confidence, float) else str(confidence))
+
     table.add_row("Worktree", task.get("worktree", "-"))
 
     if task.get("duration"):
@@ -166,3 +188,21 @@ def _print_task_detail(task: dict) -> None:
 
     if task.get("error"):
         console.print(f"\n[red]Error: {task['error']}[/red]")
+
+
+def _format_tokens(token_usage: dict, *, detailed: bool = False) -> str:
+    """Format token usage for task status output."""
+    if not token_usage:
+        return "-"
+    input_tokens = int(token_usage.get("input", token_usage.get("input_tokens", 0)) or 0)
+    output_tokens = int(token_usage.get("output", token_usage.get("output_tokens", 0)) or 0)
+    orchestration_tokens = int(
+        token_usage.get("orchestration", token_usage.get("orchestration_tokens", 0)) or 0
+    )
+    total = int(token_usage.get("total", 0) or 0) or input_tokens + output_tokens + orchestration_tokens
+    if detailed:
+        return (
+            f"{total:,} total "
+            f"(in {input_tokens:,} / out {output_tokens:,} / orch {orchestration_tokens:,})"
+        )
+    return f"{total:,}" if total else "-"

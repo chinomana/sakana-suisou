@@ -137,6 +137,9 @@ class OrchestrationDashboard:
         self.event_bus.on(EventType.TASK_CREATED, self._on_task_update)
         self.event_bus.on(EventType.TASK_STARTED, self._on_task_update)
         self.event_bus.on(EventType.TASK_COMPLETED, self._on_task_update)
+        self.event_bus.on(EventType.TASK_PROGRESS, self._on_task_update)
+        self.event_bus.on(EventType.TASK_FAILED, self._on_task_update)
+        self.event_bus.on(EventType.TASK_CANCELLED, self._on_task_update)
 
         self._render_layout()
 

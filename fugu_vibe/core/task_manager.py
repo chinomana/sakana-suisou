@@ -269,7 +269,7 @@ class TaskManager:
             task.status = TaskStatus.PENDING
         self._persist_task(task)
 
-        await self._emit(EventType.TASK_CREATED, {"task_id": task_id, "name": name})
+        await self._emit(EventType.TASK_CREATED, self._task_event_payload(task))
         logger.info("task_submitted", task_id=task_id, name=name, deps=task.depends_on)
 
         return task
@@ -287,6 +287,7 @@ class TaskManager:
             "tasks": [self._task_to_dict(t) for t in self._tasks.values()],
             "running": len(self._active_task_ids),
             "queued": self._queue.qsize() + scheduled_waiting,
+            "scheduled_waiting": scheduled_waiting,
             "max_parallel": self.task_config.max_parallel,
         }
 
@@ -301,7 +302,7 @@ class TaskManager:
 
         task.status = TaskStatus.CANCELLED
         self._persist_task(task)
-        await self._emit(EventType.TASK_CANCELLED, {"task_id": task_id})
+        await self._emit(EventType.TASK_CANCELLED, self._task_event_payload(task))
         return True
 
     def _is_ready(self, task_id: str) -> bool:
@@ -496,7 +497,7 @@ class TaskManager:
         task.started_at = datetime.now()
         self._persist_task(task)
 
-        await self._emit(EventType.TASK_STARTED, {"task_id": task_id})
+        await self._emit(EventType.TASK_STARTED, self._task_event_payload(task))
 
         try:
             task.worktree_path = self._create_worktree(task)
@@ -526,7 +527,10 @@ class TaskManager:
                     asyncio.create_task(
                         self._emit(
                             EventType.TASK_PROGRESS,
-                            {"task_id": task_id, "output_length": len("".join(output_parts))},
+                            {
+                                **self._task_event_payload(task),
+                                "output_length": len("".join(output_parts)),
+                            },
                         )
                     )
 
@@ -580,16 +584,7 @@ class TaskManager:
                 self._merge_worktree(task)
                 self._persist_task(task)
 
-            await self._emit(
-                EventType.TASK_COMPLETED,
-                {
-                    "task_id": task_id,
-                    "duration": task.duration,
-                    "tokens": task.token_usage,
-                    "rounds": result.rounds,
-                    "tool_calls": len(result.tool_calls),
-                },
-            )
+            await self._emit(EventType.TASK_COMPLETED, self._task_event_payload(task))
             await self._wake_dependents(task_id)
 
         except asyncio.CancelledError:
@@ -600,7 +595,7 @@ class TaskManager:
             task.error = str(e)
             task.completed_at = datetime.now()
             self._persist_task(task)
-            await self._emit(EventType.TASK_FAILED, {"task_id": task_id, "error": str(e)})
+            await self._emit(EventType.TASK_FAILED, self._task_event_payload(task))
             logger.error("task_failed", task_id=task_id, error=str(e))
         finally:
             self._running_tasks.pop(task_id, None)
@@ -624,9 +619,21 @@ class TaskManager:
     def _task_to_dict(self, task: Task) -> dict[str, Any]:
         """Convert task to dictionary representation."""
         return {
+            **self._task_event_payload(task),
+            "description": task.description,
+            "output": task.output,
+            "error": task.error,
+            "created_at": task.created_at.isoformat(),
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        }
+
+    def _task_event_payload(self, task: Task) -> dict[str, Any]:
+        """Compact task payload for live events, status, and dashboards."""
+        metadata = task.metadata or {}
+        return {
             "task_id": task.task_id,
             "name": task.name,
-            "description": task.description,
             "status": task.status.value,
             "model": task.model,
             "effort": task.effort,
@@ -635,9 +642,9 @@ class TaskManager:
             "worktree": task.worktree_path,
             "duration": task.duration,
             "token_usage": task.token_usage,
-            "output": task.output,
-            "error": task.error,
-            "created_at": task.created_at.isoformat(),
-            "started_at": task.started_at.isoformat() if task.started_at else None,
-            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            "rounds": metadata.get("rounds", 0),
+            "tool_call_count": metadata.get("tool_call_count", 0),
+            "tool_calls": metadata.get("tool_calls", []),
+            "orchestration": metadata.get("orchestration", {}),
+            "metadata": metadata,
         }

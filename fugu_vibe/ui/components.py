@@ -171,7 +171,10 @@ class TaskTree:
     def update_task(self, data: dict) -> None:
         """Update or add a task."""
         task_id = data.get("task_id", "")
-        self.tasks[task_id] = data
+        if not task_id:
+            return
+        current = self.tasks.get(task_id, {})
+        self.tasks[task_id] = {**current, **data}
 
     def render(self) -> Tree:
         """Render task tree."""
@@ -190,14 +193,30 @@ class TaskTree:
         for task_id, task in self.tasks.items():
             status = task.get("status", "unknown")
             icon = status_icons.get(status, "❓")
-            name = task.get("name", task_id)
-            model = task.get("model", "")
+            name = str(task.get("name", task_id))
+            model = str(task.get("model", ""))
 
-            node = root.add(f"{icon} {name} [{model}]")
+            rounds = task.get("rounds") or 0
+            tool_count = task.get("tool_call_count") or 0
+            node = root.add(Text(f"{icon} {name} [{model}] · r{rounds} · tools {tool_count}"))
 
-            # Add details
             if task.get("duration"):
                 node.add(f"⏱️  {task['duration']:.1f}s")
+
+            token_usage = task.get("token_usage") or {}
+            token_total = token_usage.get("total") or sum(
+                int(token_usage.get(key, 0) or 0) for key in ("input", "output", "orchestration")
+            )
+            if token_total:
+                node.add(f"📊 tokens {token_total:,}")
+
+            orchestration = task.get("orchestration") or {}
+            if orchestration:
+                workers = orchestration.get("workers", 0)
+                verifications = orchestration.get("verifications", 0)
+                confidence = orchestration.get("routing_confidence")
+                confidence_text = f", confidence {confidence:.0%}" if isinstance(confidence, float) else ""
+                node.add(f"⚙️ workers {workers}, checks {verifications}{confidence_text}")
 
             deps = task.get("depends_on", [])
             if deps:

@@ -98,6 +98,8 @@ async def _submit(
         console.print(f"[green]✅ Task submitted:[/green] {task.task_id}")
         console.print(f"   Name: {task.name}")
         console.print(f"   Status: {task.status.value}")
+        console.print(f"   Model: {task.model} ({task.effort})")
+        console.print(f"   Max parallel: {config.tasks.max_parallel}")
         if task.depends_on:
             console.print(f"   Depends on: {', '.join(task.depends_on)}")
 
